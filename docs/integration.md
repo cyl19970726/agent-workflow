@@ -79,4 +79,3 @@ Phase 是用户理解成果的入口，workflow/step/attempt 是执行审计层�
 - 真实端到端运行、崩溃恢复、成本/用量和阅读质量验收。
 
 因此“库里有某个 API”不表示 #71 已完成。集成验收必须以宿主的真实队列、真实资产和实际页面为证据。可参考 [`examples/review-workflow.mjs`](../examples/review-workflow.mjs) 理解候选—验证—复核的组合方式；它是演示，不是 self-media 的生产研究流程。
-
