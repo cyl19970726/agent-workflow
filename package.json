@@ -13,8 +13,11 @@
     "build": "npm run build -w @signal-room/workflow && npm run build -w @signal-room/workflow-codex && npm run build -w @signal-room/workflow-sqlite",
     "prepare": "npm run build",
     "test": "vitest run",
-    "verify": "npm run build && npm test",
-    "example": "node examples/document-check.mjs"
+    "verify": "npm run build && npm run check:docs && npm run check:examples && npm test && npm run examples",
+    "example": "node examples/document-check.mjs",
+    "examples": "node examples/document-check.mjs && node examples/review-workflow.mjs && node examples/failure-recovery.mjs",
+    "check:examples": "tsc -p examples/tsconfig.json",
+    "check:docs": "node scripts/check-doc-links.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.2.1",
