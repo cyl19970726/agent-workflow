@@ -1,0 +1,24 @@
+{
+  "name": "agent-workflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "npm run build -w @signal-room/workflow && npm run build -w @signal-room/workflow-codex && npm run build -w @signal-room/workflow-sqlite",
+    "prepare": "npm run build",
+    "test": "vitest run",
+    "verify": "npm run build && npm test",
+    "example": "node examples/document-check.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.2.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

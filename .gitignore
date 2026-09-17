@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.runtime/
+.env
+.env.*
+*.log
+.DS_Store
+.workflow/
