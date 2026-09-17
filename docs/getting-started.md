@@ -86,7 +86,6 @@ const resumed = await runWorkflow({
 - [编写工作流](./writing-workflows.md)：全部 `ctx.*` 方法、并发、阶段、资产和 replay 规则。
 - [Codex 与 Skills](./codex-and-skills.md)：Agent 定义、方法快照、cwd 和私有 trace。
 - [接入宿主应用](./integration.md)：队列、dispatcher、SQLite、读模型和 UI 边界。
-- 项目内的 [workflow authoring skill](../.agents/skills/agent-workflow/SKILL.md)：交给 Codex 等开发 Agent 使用的编写检查清单。
 
 ## 作为 submodule 接入项目
 
@@ -123,4 +122,4 @@ git submodule add https://github.com/cyl19970726/agent-workflow.git vendor/agent
 
 包导出编译后的 JavaScript 和类型。共享源码修改后重新运行 `npm run build:workflow`，重启消费服务；可将它加入现有 dev/test 入口的前置脚本。若宿主已有 prepare 或 pretest，合并原流程，不覆盖已有工作。
 
-要在 submodule 内独立开发与验证，可进入该目录运行 `npm ci && npm run verify`；这是共享仓库自己的工具依赖。项目内 authoring skill 的接入见 [使用 Skill](./using-the-skill.md)。
+要在 submodule 内独立开发与验证，可进入该目录运行 `npm ci && npm run verify`；这是共享仓库自己的工具依赖。可运行示例位于 `examples/`；编写流程时直接参考本仓库文档。

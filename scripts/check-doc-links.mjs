@@ -8,7 +8,7 @@ function markdownFiles(target) {
   if (stat.isFile()) return target.endsWith('.md') ? [target] : [];
   return fs.readdirSync(target).flatMap(name => markdownFiles(path.join(target, name)));
 }
-const files = ['README.md', 'AGENTS.md', 'docs', '.agents/skills', 'packages/core/README.md']
+const files = ['README.md', 'AGENTS.md', 'docs', 'packages/core/README.md']
   .flatMap(name => markdownFiles(path.join(root, name)));
 const errors = [];
 for (const file of files) {

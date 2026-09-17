@@ -1,4 +1,0 @@
-interface:
-  display_name: "Agent Workflow"
-  short_description: "使用共享引擎编写、组合与验证可恢复的多 Agent 工作流"
-  default_prompt: "使用 $agent-workflow 为当前项目编写一个可恢复的工作流，明确阶段、资产、模型与 skill 配置，并验证失败和恢复路径。"

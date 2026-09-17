@@ -38,7 +38,7 @@ const reviewer = defineAgent<ReviewInput, ReviewReceipt>({
 
 `outputSchema` 约束 SDK 最终响应；`receiptFiles` 只观察指定输出文件是否存在并记录哈希。两者都不等同于业务合同或研究质量验证，后者必须由 workflow 中显式的 `ctx.validate` 和独立 Reviewer 完成。
 
-## 方法快照与 authoring skill 是两件事
+## 业务方法快照
 
 每个业务 Agent 可以在 `config.skills` 中声明它此次执行必须收到的方法文件。runner 会读取文件内容，将内容嵌入有效 prompt，并记录路径、SHA-256、字节数和 prompt anchor。这证明某个确切方法版本被交付给该 attempt；它不证明模型遵守了方法。
 
@@ -46,7 +46,6 @@ const reviewer = defineAgent<ReviewInput, ReviewReceipt>({
 
 生产配置应在 `defineAgent` 前读取并冻结 `{ path, content }`，同时把内容摘要写入 `skillsRevision`。若只传 `{ path }`，文件内容要到实际执行时才读取，core 在复用外层 phase/group 控制步骤前无法感知文件已变化。任何方法正文、嵌套模型或 prompt 变化都必须同步提升 workflow revision，并开启新 run；不要尝试用新定义恢复旧 revision 的 run。
 
-[`../.agents/skills/agent-workflow/SKILL.md`](../.agents/skills/agent-workflow/SKILL.md) 则是给开发者或 Codex 使用的“如何编写本库 workflow”技能。它帮助作者选择稳定 key、replay、验证和宿主边界，不会自动成为每个业务 Agent 的研究方法。业务 Agent 需要什么方法，应在自身 `config.skills` 中逐项声明。
 
 也可以先用 `attachVerifiedSkillSnapshots(prompt, requiredPaths)` 生成带收据的 prompt，适合已有适配器逐步迁移。不要把“文件位于 cwd”或模型自述当成方法已加载的证据。
 

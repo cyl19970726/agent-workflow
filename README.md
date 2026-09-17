@@ -29,12 +29,10 @@ npm run verify
 | 你要做什么 | 从这里开始 |
 | --- | --- |
 | 在新项目中安装、运行第一个流程 | [快速开始](docs/getting-started.md) |
-| 让开发 Agent 按本库编写 workflow | [使用 `$agent-workflow` skill](docs/using-the-skill.md) |
 | 编写小流程、并行、阶段、验证和资产 | [编写工作流与 API](docs/writing-workflows.md) |
 | 给每个 Agent 配模型、业务 skill、cwd 和 trace | [Codex 与方法 skill](docs/codex-and-skills.md) |
 | 接入已有队列、持久恢复、API 和阶段工作台 | [宿主集成](docs/integration.md) |
 
-两种 skill 的职责不同：本仓库的 [编排 skill](.agents/skills/agent-workflow/SKILL.md) 帮助开发 Agent 写代码；运行时 Agent 的业务方法通过 `config.skills` 显式交付，不会自动加载编排 skill。
 
 ## 三个包
 
@@ -60,7 +58,7 @@ git submodule add https://github.com/cyl19970726/agent-workflow.git vendor/agent
 2. **先提交并推送共享仓库，再提交并推送消费项目的 submodule 指针。**
 3. 其他项目 fetch 后选择明确的提交，构建、验证并更新自己的指针。
 
-新克隆用 `git clone --recurse-submodules`；已有工作树或切换分支后用 `git submodule update --init --recursive`。不要自动跟随远端 main。项目内 skill 可链接到 submodule，见 [skill 接入](docs/using-the-skill.md#在消费项目使用)；无需全局安装。
+新克隆用 `git clone --recurse-submodules`；已有工作树或切换分支后用 `git submodule update --init --recursive`。不要自动跟随远端 main。接入只需按文档配置项目依赖与构建，无需安装编排 skill。
 
 ## 能力边界
 
