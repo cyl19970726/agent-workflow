@@ -1,15 +1,13 @@
-import { createHash } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { defineAgent, runWorkflow, workflow, type RunStore } from "@signal-room/workflow";
-import { CodexSdkRunner } from "@signal-room/workflow-codex";
+import { CodexSdkRunner, snapshotSkill } from "@signal-room/workflow-codex";
 
 type Summary = { summary: string };
 export type SummaryOptions = {
   workflowRevision: string;
   model: string;
   reasoningEffort: string;
-  methodFile: string;
+  skillDirectory: string;
   traceRoot: string;
   store: RunStore;
   resumeRunId?: string;
@@ -18,16 +16,14 @@ export type SummaryOptions = {
 /** Importing/typechecking this example never starts a model. Calling it does. */
 export async function runCodexSummary(input: { text: string }, options: SummaryOptions) {
   if (!options.workflowRevision || !options.model || !options.reasoningEffort) throw new Error("Choose workflow revision, model and effort explicitly");
-  const methodFile = path.resolve(options.methodFile);
-  const content = fs.readFileSync(methodFile, "utf8");
-  if (!content.trim()) throw new Error("Method file must not be empty");
-  const skillsRevision = createHash("sha256").update(content).digest("hex");
+  const skill = snapshotSkill(options.skillDirectory);
+  const skillsRevision = skill.sha256;
   const agent = defineAgent<typeof input, Summary>({
     id: "document-summary", revision: "1", model: options.model, reasoningEffort: options.reasoningEffort,
     promptRevision: "1", skillsRevision, permissionsRevision: "read-only-v1",
     config: {
       prompt: "Use the supplied method to summarize the frozen input. Return only the requested JSON.",
-      skills: [{ path: methodFile, content }],
+      skills: [skill],
       outputSchema: {
         type: "object", properties: { summary: { type: "string" } },
         required: ["summary"], additionalProperties: false,

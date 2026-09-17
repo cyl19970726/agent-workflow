@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { Codex, type CodexOptions, type Input, type Thread, type ThreadEvent, type ThreadOptions } from "@openai/codex-sdk";
 import type { AgentDefinition, AgentRunRequest, AgentRunResult, AgentRunner } from "@signal-room/workflow";
 
+import { snapshotSkill, stageSkill, type FrozenSkillBundle, type MaterializedSkill } from "./skill-bundle.js";
+
 const require = createRequire(import.meta.url);
 const reasoningEfforts = new Set([
   "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"
@@ -95,12 +97,13 @@ export type CodexSdkSkillSnapshot = {
  * prove that a model followed an out-of-directory path instruction.
  */
 export type SkillLoadReceipt = {
-  loading: "effective_prompt_snapshot";
+  loading: "effective_prompt_snapshot" | "native_skill_packages";
+  packages?: MaterializedSkill[];
   files: Array<{ path: string; sha256: string; bytes: number; promptAnchor: string }>;
   effectivePromptSha256: string;
 };
 
-export function attachVerifiedSkillSnapshots(prompt: string, requiredPaths: readonly string[]): {
+export function attachVerifiedSkillSnapshots(prompt: string, requiredPaths: readonly string[], options?: { outputDirectory: string }): {
   prompt: string;
   receipt: SkillLoadReceipt;
 } {
@@ -119,7 +122,8 @@ export function attachVerifiedSkillSnapshots(prompt: string, requiredPaths: read
     const promptAnchor = `skill-snapshot-${index + 1}:${sha256(content)}`;
     return { path: absolute, content, sha256: sha256(content), bytes: Buffer.byteLength(content), promptAnchor };
   });
-  const effectivePrompt = `${prompt}
+  const packages = options ? stageRequiredSkillPackages(requiredPaths, options.outputDirectory) : [];
+  const effectivePrompt = `${prompt}${packageInstructions(packages)}
 
 ## Verified required method snapshots
 ${files.map((file) =>
@@ -132,9 +136,32 @@ ${file.content}
   ).join("\n\n")}`;
   return { prompt: effectivePrompt, receipt: {
     loading: "effective_prompt_snapshot",
+    ...(packages.length ? { packages } : {}),
     files: files.map(({ path: filePath, sha256: digest, bytes, promptAnchor }) => ({ path: filePath, sha256: digest, bytes, promptAnchor })),
     effectivePromptSha256: sha256(effectivePrompt)
   } };
+}
+
+/** Stage whole containing packages for legacy callers that explicitly select method files. */
+function stageRequiredSkillPackages(requiredPaths: readonly string[], outputDirectory: string): MaterializedSkill[] {
+  const roots = new Set<string>();
+  for (const file of requiredPaths) {
+    let directory = path.dirname(path.resolve(file));
+    while (true) {
+      if (fs.existsSync(path.join(directory, "SKILL.md"))) { roots.add(directory); break; }
+      const parent = path.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  if (roots.size) fs.mkdirSync(path.resolve(outputDirectory), { recursive: true, mode: 0o700 });
+  return [...roots].map((root) => stageSkill(snapshotSkill(root), path.resolve(outputDirectory)));
+}
+
+function packageInstructions(packages: readonly MaterializedSkill[], cwd?: string): string {
+  if (!packages.length) return "";
+  return `\n\n## Required native skill packages\nRead each SKILL.md below and follow its instructions. Resolve references, scripts and assets relative to that skill directory. Use these frozen copies, not original source paths.\n${packages.map((skill) =>
+    `- ${cwd ? path.relative(cwd, skill.entrypoint).split(path.sep).join("/") : skill.entrypoint} (tree SHA-256: ${skill.sha256})`).join("\n")}`;
 }
 
 /**
@@ -144,7 +171,7 @@ ${file.content}
  */
 export type CodexSdkAgentConfig = {
   prompt: string;
-  skills?: readonly CodexSdkSkillSnapshot[];
+  skills?: readonly (CodexSdkSkillSnapshot | FrozenSkillBundle)[];
   outputSchema?: unknown;
   receiptFiles?: readonly string[];
   outputDirectory?: string;
@@ -330,17 +357,30 @@ export class CodexSdkRunner implements AgentRunner {
     fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
 
     const inputSnapshot = stableJson(request.input);
-    const skills = (config.skills ?? []).map((skill) => ({ path: skill.path, content: skill.content ?? fs.readFileSync(skill.path, "utf8") }));
-    const effectivePrompt = `${config.prompt}\n\n## Frozen workflow input\n${inputSnapshot}\n\n## Required skill snapshots\n${skills
-      .map((skill) => `### ${skill.path}\n${skill.content}`).join("\n\n")}`;
+    const skills = (config.skills ?? []).map((skill) => {
+      if ("kind" in skill && skill.kind === "skill_bundle") return skill;
+      if (path.basename(skill.path) === "SKILL.md" || fs.existsSync(skill.path) && fs.statSync(skill.path).isDirectory()) {
+        const bundle = snapshotSkill(skill.path);
+        if (skill.content !== undefined && skill.content !== bundle.content) throw new Error("CODEX_SKILL_ENTRY_SNAPSHOT_MISMATCH:use_snapshotSkill");
+        return bundle;
+      }
+      return { path: skill.path, content: skill.content ?? fs.readFileSync(skill.path, "utf8") };
+    });
+    const bundles = skills.filter((skill): skill is FrozenSkillBundle => "kind" in skill && skill.kind === "skill_bundle");
+    const methods = skills.filter((skill) => !("kind" in skill));
+    const packages = bundles.map((bundle) => stageSkill(bundle, outputDir));
+    const effectivePrompt = `${config.prompt}\n\n## Frozen workflow input\n${inputSnapshot}\n\n## Required skill snapshots\n${methods
+      .map((skill) => `### ${skill.path}\n${skill.content}`).join("\n\n")}${packageInstructions(packages, outputDir)}`;
     const skillLoad: SkillLoadReceipt = {
-      loading: "effective_prompt_snapshot",
-      files: skills.map((skill) => ({ path: skill.path, sha256: sha256(skill.content), bytes: Buffer.byteLength(skill.content),
+      loading: packages.length ? "native_skill_packages" : "effective_prompt_snapshot",
+      packages,
+      files: methods.map((skill) => ({ path: skill.path, sha256: sha256(skill.content), bytes: Buffer.byteLength(skill.content),
         promptAnchor: `### ${skill.path}` })),
       effectivePromptSha256: sha256(effectivePrompt)
     };
     const fingerprint = sha256(stableJson({ role: definition.id, revision: definition.revision, model: definition.model,
-      reasoningEffort: definition.reasoningEffort, prompt: effectivePrompt, skills, input: request.input,
+      reasoningEffort: definition.reasoningEffort, prompt: effectivePrompt,
+      skills: skills.map((skill) => "kind" in skill ? { name: skill.name, sha256: skill.sha256 } : skill), input: request.input,
       permissionsRevision: definition.permissionsRevision }));
     const runtime = {
       agent: { id: definition.id, revision: definition.revision }, runId: request.runId, stepRunId: request.stepRunId,

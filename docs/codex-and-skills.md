@@ -8,20 +8,21 @@
 
 ```ts
 import { defineAgent } from "@signal-room/workflow";
-import type { CodexSdkAgentConfig } from "@signal-room/workflow-codex";
+import { snapshotSkill, type CodexSdkAgentConfig } from "@signal-room/workflow-codex";
 
+const skill = snapshotSkill("/absolute/project/.agents/skills/video-method");
 const reviewer = defineAgent<ReviewInput, ReviewReceipt>({
   id: "post-reviewer",
   revision: "3",
   model: "gpt-5.6-luna",
   reasoningEffort: "medium",
   promptRevision: "review-prompt-4",
-  skillsRevision: "video-method-8",
+  skillsRevision: skill.sha256,
   permissionsRevision: "review-workspace-write-2",
   config: {
     prompt: "独立复核候选，并只返回合同允许的 JSON。",
     skills: [
-      { path: "/absolute/project/.agents/skills/video-method/SKILL.md" },
+      skill,
     ],
     outputSchema: reviewReceiptJsonSchema,
     receiptFiles: ["evaluation.json"],
@@ -38,16 +39,28 @@ const reviewer = defineAgent<ReviewInput, ReviewReceipt>({
 
 `outputSchema` 约束 SDK 最终响应；`receiptFiles` 只观察指定输出文件是否存在并记录哈希。两者都不等同于业务合同或研究质量验证，后者必须由 workflow 中显式的 `ctx.validate` 和独立 Reviewer 完成。
 
-## 业务方法快照
+## 完整 skill 包与普通方法文件
 
-每个业务 Agent 可以在 `config.skills` 中声明它此次执行必须收到的方法文件。runner 会读取文件内容，将内容嵌入有效 prompt，并记录路径、SHA-256、字节数和 prompt anchor。这证明某个确切方法版本被交付给该 attempt；它不证明模型遵守了方法。
+Skill 是一个目录，不只是 SKILL.md。先用 `snapshotSkill(directoryOrSkillMd)` 冻结整个包，再把返回值放入 `config.skills`。快照包含 `references/`、`scripts/`、`assets/`、`schemas/` 等所有文件的原始字节和执行权限；仅忽略 `.git` 与 `.DS_Store`。包内符号链接会解引用，逃出包目录的链接或循环会报错。外部依赖须由消费项目显式准备，库不会自动安装依赖或全局 skill。
 
-若方法依赖其他 reference 文件，也应将本次必需文件逐项冻结交付，或提供经过权限验证的读取路径；嵌入 SKILL.md 不会自动递归加载其引用文件。
+runner 在 SDK 启动前把包还原到 `<workingDirectory>/.agents/skills/<name>/`，使 Codex 原生目录发现和相对路径读取可用。提示词要求读取该处 SKILL.md，其他文件按需读取，不把所有二进制或 reference 内容塞进 prompt。源目录修改、移动或删除不影响已冻结的 bundle。收据记录完整文件清单、树摘要和交付目录；它证明交付，不证明模型读取或遵循了所有文件，具体执行要看工具事件与业务验证。
 
-生产配置应在 `defineAgent` 前读取并冻结 `{ path, content }`，同时把内容摘要写入 `skillsRevision`。若只传 `{ path }`，文件内容要到实际执行时才读取，core 在复用外层 phase/group 控制步骤前无法感知文件已变化。任何方法正文、嵌套模型或 prompt 变化都必须同步提升 workflow revision，并开启新 run；不要尝试用新定义恢复旧 revision 的 run。
+普通独立 Markdown 方法仍支持 `{ path, content }`。目录或 SKILL.md 的 `{ path }` 简写会在实际执行时捕获全包；生产 workflow 应在 `defineAgent` 前调用 `snapshotSkill`，避免 replay 判断早于磁盘读取。只冻结 SKILL.md 正文不能替代全包快照。
 
+树摘要包含相对路径、文件内容和权限，reference、脚本、素材的变更都会改变摘要。将 `skill.sha256` 写入 `skillsRevision`。任何方法、嵌套模型或 prompt 变化还必须提升 workflow revision 并开启新 run：core 可以复用整个已完成 phase/group，不会执行其内部闭包重新发现依赖。线程 resume 也要求完整指纹一致。
 
-也可以先用 `attachVerifiedSkillSnapshots(prompt, requiredPaths)` 生成带收据的 prompt，适合已有适配器逐步迁移。不要把“文件位于 cwd”或模型自述当成方法已加载的证据。
+已有低层适配器可用 `attachVerifiedSkillSnapshots(prompt, requiredPaths, { outputDirectory })`：它从所选文件向上找到最近的 SKILL.md，冻结并交付整个包，同时保留旧的指定文本与收据。务必传入实际 SDK cwd；两参数旧接口仅交付文本，不具备完整 skill 加载语义。
+
+不同 skill 应使用不同目录名。建议每次 attempt 使用独立 cwd；若显式复用 outputDirectory，已有同名包必须与本次快照完全一致，否则报错，不会覆盖、混合或遗留上一版本文件。运行期间需要修改的文件应写到输出目录，不能修改冻结的 skill 包。文件私有权限为 0600，带执行位的脚本为 0700。
+
+可运行完整包验证：
+
+```bash
+npm run build
+WORKFLOW_SMOKE_MODEL=gpt-5.6-luna node examples/skill-package-smoke.mjs
+```
+
+这会真实调用模型并产生费用，日常 verify 不自动运行。例子先冻结一个包含规则、脚本和二进制素材的包，删除源目录，再通过 workflow 调用 Codex、校验随机 token 和脚本结果，并检查命令事件。
 
 ## cwd 与冻结输入
 
@@ -77,3 +90,5 @@ trace 文件权限设为私有，并应保留在宿主的私有运行目录。�
 线程 resume 只有在 role 与完整 fingerprint 都匹配时才允许；不匹配会报错，而不是静默继续旧上下文。workflow 的节点 replay 与 Codex thread resume 是不同层次：前者复用已验证步骤，后者在一个符合指纹的模型线程上继续。
 
 一个不自动发起真实模型请求的配置示例见 [`examples/codex-workflow.ts`](../examples/codex-workflow.ts)。完整的 workflow 编写原则见 [编写工作流](./writing-workflows.md)。
+
+本次修复的复现、真实模型工具证据与验收边界见 [完整 Skill 包加载验证](./skill-package-verification.md)。
