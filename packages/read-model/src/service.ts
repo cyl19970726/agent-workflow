@@ -40,21 +40,40 @@ const safeUsage = (event: WorkflowEvent | undefined): AttemptView["usage"] => {
   for (const key of numbers) if (typeof raw[key] === "number" && Number.isSafeInteger(raw[key]) && raw[key] >= 0) result[key] = raw[key];
   return Object.keys(result).length ? result : undefined;
 };
+const aggregateUsage = (events: WorkflowEvent[]): AttemptView["usage"] => {
+  const usageEvents = events.filter(e => e.type === "agent.usage" && safeUsage(e));
+  const chosen = usageEvents.length ? usageEvents : events.filter(e => e.type === "agent.completed" && safeUsage(e));
+  const executions = new Map<string, NonNullable<AttemptView["usage"]>>();
+  for (const event of chosen) {
+    const data = event.data && typeof event.data === "object" ? event.data as Record<string, unknown> : {};
+    const executionId = typeof data.childRunId === "string" && data.childRunId ? data.childRunId
+      : typeof data.threadId === "string" && data.threadId ? data.threadId : "unknown";
+    executions.set(executionId, safeUsage(event)!);
+  }
+  const result: NonNullable<AttemptView["usage"]> = {};
+  for (const usage of executions.values()) for (const key of ["inputTokens", "cachedInputTokens", "outputTokens"] as const) {
+    if (usage[key] !== undefined) result[key] = (result[key] ?? 0) + usage[key]!;
+  }
+  return Object.keys(result).length ? result : undefined;
+};
 
 export function createWorkflowReadService({ store, adapters = {}, maxCursors = 64, maxRuns = 2000 }: ReadOptions): WorkflowReadService {
   const cursors = new Map<string, CursorEntry>();
   const detailCursors = new Map<string, { rootRunId: string; phaseId: string; calls: CallView[]; artifacts: SafeArtifact[]; offset: number }>();
-  async function collect(rootRunId: string, prior?: CursorEntry): Promise<{ runs: RunRecord[]; steps: Map<string, StepRecord[]>; artifacts: ArtifactRef[]; events: Map<string, WorkflowEvent[]>; watermarks: Record<string, number> }> {
+  async function collect(rootRunId: string, prior?: CursorEntry): Promise<{ runs: RunRecord[]; cycleIds: Set<string>; steps: Map<string, StepRecord[]>; artifacts: ArtifactRef[]; events: Map<string, WorkflowEvent[]>; watermarks: Record<string, number> }> {
     const root = await store.getRun(rootRunId);
     if (!root) throw new Error("Root run not found");
-    const runs: RunRecord[] = [], seen = new Set<string>(), queue = [root];
+    const runs: RunRecord[] = [], seen = new Set<string>(), cycleIds = new Set<string>(), queue = [root];
     while (queue.length) {
       const run = queue.shift()!;
       if (seen.has(run.id)) continue;
       seen.add(run.id); runs.push(run);
       if (runs.length > maxRuns) throw new Error("Run tree exceeds configured limit");
       const children = await store.listRuns({ parentRunId: run.id });
-      for (const child of children) if (child.parentRunId === run.id) queue.push(child);
+      for (const child of children) if (child.parentRunId === run.id) {
+        if (seen.has(child.id)) cycleIds.add(child.id);
+        else queue.push(child);
+      }
     }
     const steps = new Map<string, StepRecord[]>(), events = new Map<string, WorkflowEvent[]>(), artifacts: ArtifactRef[] = [];
     const watermarks: Record<string, number> = {};
@@ -66,10 +85,10 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       watermarks[run.id] = list.at(-1)?.seq ?? 0;
       artifacts.push(...await store.listArtifacts(run.id));
     }
-    return { runs, steps, artifacts, events, watermarks };
+    return { runs, cycleIds, steps, artifacts, events, watermarks };
   }
   async function project(rootRunId: string, data: Awaited<ReturnType<typeof collect>>): Promise<WorkflowSnapshot> {
-    const { runs, steps, events } = data;
+    const { runs, cycleIds, steps, events } = data;
     const artifacts = [...data.artifacts];
     const runIds = new Set(runs.map(r => r.id));
     const allSteps = [...steps.values()].flat();
@@ -127,7 +146,7 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
     const runViews: RunView[] = runs.map(r => ({ id: r.id, workflowId: r.workflowId, state: state(r.state),
       ...(r.parentRunId ? { parentRunId: r.parentRunId } : {}), ...(r.parentStepRunId ? { parentStepId: r.parentStepRunId } : {}),
       childRunIds: runs.filter(c => c.parentRunId === r.id).map(c => c.id),
-      ...(r.id !== rootRunId && r.parentRunId && (!runIds.has(r.parentRunId) || (r.parentStepRunId && !stepById.has(r.parentStepRunId))) ? { diagnostic: "missing_parent" as const } : {}) }));
+      ...(cycleIds.has(r.id) ? { diagnostic: "cycle" as const } : r.id !== rootRunId && r.parentRunId && (!runIds.has(r.parentRunId) || (r.parentStepRunId && !stepById.has(r.parentStepRunId))) ? { diagnostic: "missing_parent" as const } : {}) }));
     for (const r of runViews) if (r.diagnostic) diagnostics.push(`${r.diagnostic}:${r.id}`);
     const safeArtifacts: SafeArtifact[] = artifacts.map(a => ({ identity: identity(a), type: a.type, schemaVersion: a.schemaVersion, scope: externalIds.has(a.id) ? "external" : "produced",
       producer: { runId: a.producedBy.workflowRunId, stepId: a.producedBy.stepRunId, attemptId: a.producedBy.attemptId },
@@ -221,7 +240,7 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       call.attempts = attempts.map(a => {
         const own = ev.filter(e => e.attemptId === a.id);
         const error = a.error ? adapters.error?.(a.id, a.error) : undefined;
-        const usage = safeUsage(last(own, "agent.usage") ?? last(own, "agent.completed"));
+        const usage = aggregateUsage(own);
         return { id: a.id, state: state(a.state), ...(error ? { error } : {}),
           ...(usage ? { usage } : {}),
           ...(eventTime(own, "step.started") ? { startedAt: eventTime(own, "step.started") } : {}),

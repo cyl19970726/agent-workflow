@@ -233,4 +233,25 @@ describe("workflow read service", () => {
     const view = await service.getSnapshot({ rootRunId: root.id });
     expect(view.calls[0]).toMatchObject({ inputArtifactIds: [source.id], artifactIds: [output.id] });
   });
+
+  it("sums distinct execution usage once and leaves absent token dimensions unknown", async () => {
+    const store = new MemoryRunStore(); const root = await run(store); const agent = await step(store, root.id, "agent");
+    const attempt = await store.createAttempt({ runId: root.id, stepRunId: agent.id, state: "succeeded" });
+    const emit = (type: string, data: object) => store.appendEvent({ runId: root.id, stepRunId: agent.id, attemptId: attempt.id, type, data });
+    await emit("agent.usage", { childRunId: "one", usage: { inputTokens: 10, cachedInputTokens: 2 } });
+    await emit("agent.usage", { childRunId: "one", usage: { inputTokens: 10, cachedInputTokens: 2 } });
+    await emit("agent.usage", { childRunId: "two", usage: { inputTokens: 4 } });
+    await emit("agent.completed", { threadId: "one", usage: { inputTokens: 10, outputTokens: 99 } });
+    const view = await createWorkflowReadService({ store }).getSnapshot({ rootRunId: root.id });
+    expect(view.calls[0]?.attempts[0]?.usage).toEqual({ inputTokens: 14, cachedInputTokens: 2 });
+    expect(view.calls[0]?.attempts[0]?.usage).not.toHaveProperty("outputTokens");
+  });
+
+  it("diagnoses a parent cycle without adding duplicate runs", async () => {
+    const store = new MemoryRunStore(); const root = await run(store); const child = await run(store, root.id, "root-step");
+    store.runs.find(r => r.id === root.id)!.parentRunId = child.id;
+    const view = await createWorkflowReadService({ store }).getSnapshot({ rootRunId: root.id });
+    expect(view.runs.map(r => r.id)).toEqual([root.id, child.id]);
+    expect(view.diagnostics).toContain(`cycle:${root.id}`);
+  });
 });

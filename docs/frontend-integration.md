@@ -46,6 +46,8 @@ Agent 输出通常由后续 `publish` 控制步骤写入，账本的 `producedBy
 
 `StageView.id` 是稳定的阶段控制步骤 ID，`phaseKey` 是 workflow 定义中的 phase ID。持久恢复可能为同一个逻辑阶段创建多个控制步骤；投影按 `runId + phaseId` 合并，沿用首个控制步骤 ID，用最新控制步骤的状态和绑定，保留历次调用。相同 phase key 在并行子 run 中仍是不同阶段。`CallView.phaseId` 引用 `StageView.id`；子 run 的调用可继承父阶段归属。`call.childRunIds` 展示持久子流程，`attempts` 展示同一逻辑调用的实际执行记录。显式 `read-model.retry` 事件才产生 `retryOf`；旧记录没有此事件时关系未知，不按名字或时间推断。
 
+每个 Agent attempt 的用量按 `agent.usage` 的实际 `childRunId` 去重后累加；没有此类事件时才使用 `agent.completed` 的 `threadId`。同一执行重复上报不重复计费，不同子执行的 token 相加，缺失的输入/缓存/输出维度保持未定义而非零。父 workflow 不再次累计这些 Agent 用量。异常父子循环会出现在 `diagnostics`，不会无限递归或静默拼接。
+
 不要把四种状态压成一个“完成”：`state` 是执行状态，`validation` 是结构校验，`review` 是独立复核事实，`delivery` 是交付选择。执行 `succeeded` 不保证候选可交付。`expectedArtifacts.required` 只标记绑定缺失，不改变 run 的执行结果。`waitingForRunId` 表示父阶段等待子运行；`blocked`、`needs_review`、`failed` 和 `canceled` 应分别显示。被取消的 run 上仍为 `waiting` 的阶段投影为 `canceled`。历史资料不足时显示 `unknown`，不要猜“通过”。
 
 `progress.registered` 是实际登记阶段数，`completed` 是成功阶段数；只有宿主明确声明计划数时才有 `planned`。`closed: false` 或缺失 `planned` 时不能渲染固定百分比。阶段同时列出已绑定和同阶段产出的资产，因此第一份候选发布后可以出现，不需等整个 root 终态。多个异类资产不会自动构成阶段候选歧义；只有多个显式 primary 绑定或冲突的 selected 关系才把阶段标记 `ambiguous`。若宿主提供 `isDeliverable`，快照另有顶层 `delivery`：只从本次树内产物挑选业务候选，零个为 `missing`、单个未选择为 `unknown`、多个未选择为 `ambiguous`、一个有效选择为 `selected`；外部引用及其他类型不计入。没有选定关系时不会按发布时间选最新候选。
