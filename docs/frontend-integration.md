@@ -54,6 +54,8 @@ Agent 输出通常由后续 `publish` 控制步骤写入，账本的 `producedBy
 
 `progress.registered` 是实际登记阶段数，`completed` 是成功阶段数；只有宿主明确声明计划数时才有 `planned`。`closed: false` 或缺失 `planned` 时不能渲染固定百分比。阶段同时列出已绑定和同阶段产出的资产，因此第一份候选发布后可以出现，不需等整个 root 终态。多个异类资产不会自动构成阶段候选歧义；只有多个显式 primary 绑定或冲突的 selected 关系才把阶段标记 `ambiguous`。若宿主提供 `isDeliverable`，快照另有顶层 `delivery`：只从本次树内产物挑选业务候选，零个为 `missing`、单个未选择为 `unknown`、多个未选择为 `ambiguous`、一个有效选择为 `selected`；外部引用及其他类型不计入。没有选定关系时不会按发布时间选最新候选。
 
+宿主可用 `phaseAudience(step)` 明确将内部控制阶段标为 `audit`，其他阶段默认 `reader`。快照仍完整返回两类阶段，审计层可按 ID 请求详情；`progress.registered/completed` 只计算 `reader` 阶段。前端主视图以 `audience !== "audit"` 过滤卡片，避免隐藏技术阶段后进度仍显示多一项。这个分类由宿主工作流语义决定，读模型不会靠阶段名称或状态猜测。
+
 ## 精确资产关系
 
 每个端点使用 `{ id, revision, sha256 }`，不能只有 ID。方向如下：

@@ -254,4 +254,17 @@ describe("workflow read service", () => {
     expect(view.runs.map(r => r.id)).toEqual([root.id, child.id]);
     expect(view.diagnostics).toContain(`cycle:${root.id}`);
   });
+
+  it("keeps audit phases reachable without inflating reader progress", async () => {
+    const store = new MemoryRunStore(); const root = await run(store);
+    const reader = await step(store, root.id, "phase", "build");
+    const audit = await step(store, root.id, "phase", "revision-artifacts");
+    await store.updateStep(reader.id, { state: "succeeded" });
+    await store.updateStep(audit.id, { state: "succeeded" });
+    const view = await createWorkflowReadService({ store, adapters: { phaseAudience: phase => phase.phaseId === "revision-artifacts" ? "audit" : "reader" } }).getSnapshot({ rootRunId: root.id });
+    expect(view.stages).toHaveLength(2);
+    expect(view.stages.find(s => s.id === audit.id)?.audience).toBe("audit");
+    expect(view.stages.find(s => s.id === reader.id)?.audience).toBe("reader");
+    expect(view.progress).toMatchObject({ registered: 1, completed: 1 });
+  });
 });

@@ -17,6 +17,7 @@ export interface ReadAdapters {
   /** Explicit domain facts only; the service never inspects payloads to infer review or selection. */
   relations?: (artifact: ArtifactRef) => readonly (Omit<ArtifactRelation, "validity"> & { validity?: "mismatch" | "missing" })[] | Promise<readonly (Omit<ArtifactRelation, "validity"> & { validity?: "mismatch" | "missing" })[]>;
   phaseFacts?: (phase: StepRecord) => Partial<Pick<StageView, "review" | "delivery" | "state">> | Promise<Partial<Pick<StageView, "review" | "delivery" | "state">>>;
+  phaseAudience?: (phase: StepRecord) => "reader" | "audit";
   callFacts?: (step: StepRecord, events: readonly WorkflowEvent[]) => Partial<Pick<CallView, "model" | "reasoningEffort" | "methodRevision" | "methodDigest">>;
   plan?: (root: RunRecord) => { planned?: number; closed: boolean };
 }
@@ -209,7 +210,7 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       const f = await adapters.phaseFacts?.(step);
       const waitingEvent = last(ev.filter(e => e.stepRunId === step.id), "phase.waiting");
       const waitingData = waitingEvent?.data && typeof waitingEvent.data === "object" ? waitingEvent.data as Record<string, unknown> : {};
-      stages.push({ id: stableStageId, phaseKey: step.phaseId, runId: step.runId, path: [...(step.phasePath ?? [step.phaseId])], title: adapters.title?.("phase", step.phaseId, step) ?? "Phase",
+      stages.push({ id: stableStageId, phaseKey: step.phaseId, runId: step.runId, path: [...(step.phasePath ?? [step.phaseId])], audience: adapters.phaseAudience?.(step) ?? "reader", title: adapters.title?.("phase", step.phaseId, step) ?? "Phase",
         purpose: adapters.purpose?.(step) ?? "", ...(step.phaseDefinition?.order !== undefined ? { order: step.phaseDefinition.order } : {}), state: safeFact(f?.state, validStates) ?? (runById.get(step.runId)?.state === "canceled" && step.state === "waiting" ? "canceled" : state(step.state)),
         validation: fact(step.validation), review: safeFact(f?.review, ["unknown", "pending", "passed", "findings", "not_applicable"]) ?? derivedReview,
         delivery: safeFact(f?.delivery, ["unknown", "missing", "ambiguous", "selected"]) ?? delivery,
@@ -227,8 +228,9 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       state: (selectedIds.length > 1 ? "ambiguous" : selectedIds.length === 1 ? "selected" : candidates.length > 1 ? "ambiguous" : candidates.length === 1 ? "unknown" : "missing") as "missing" | "unknown" | "ambiguous" | "selected",
       artifactIds: selectedIds.length ? selectedIds : candidates.map(a => a.id),
     } : undefined;
+    const readerStages = stages.filter(s => s.audience !== "audit");
     return { schemaVersion: 1, rootRunId, cursor: "", runs: runViews, stages, calls, artifacts: safeArtifacts, relations,
-      progress: { registered: stages.length, completed: stages.filter(s => s.state === "succeeded").length,
+      progress: { registered: readerStages.length, completed: readerStages.filter(s => s.state === "succeeded").length,
         ...(plan?.planned !== undefined ? { planned: plan.planned } : {}), closed: plan?.closed ?? false }, ...(delivery ? { delivery } : {}), diagnostics };
   }
   async function snapshot(rootRunId: string, prior?: CursorEntry): Promise<{ dto: WorkflowSnapshot; watermarks: Record<string, number>; events: Map<string, WorkflowEvent[]> }> {

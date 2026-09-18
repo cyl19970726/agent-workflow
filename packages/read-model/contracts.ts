@@ -8,7 +8,7 @@ export interface RunView { id: string; parentRunId?: string; parentStepId?: stri
 export interface AttemptView { id: string; state: ReadState; error?: string; startedAt?: string; endedAt?: string; usage?: { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number } }
 export interface CallView { id: string; runId: string; stepId: string; phaseId?: string; role: "agent" | "workflow"; state: ReadState; validation: FactState; title?: string; model?: string; reasoningEffort?: string; methodRevision?: string; methodDigest?: string; inputArtifactIds: string[]; reused: boolean; retryOf?: string; retryReason?: string; attempts: AttemptView[]; artifactIds: string[]; childRunIds: string[] }
 export interface StageView {
-  id: string; phaseKey: string; runId: string; path: string[];
+  id: string; phaseKey: string; runId: string; path: string[]; audience?: "reader" | "audit";
   title: string; purpose: string; order?: number; state: ReadState;
   validation: FactState; review: FactState;
   delivery: "unknown" | "missing" | "ambiguous" | "selected";
