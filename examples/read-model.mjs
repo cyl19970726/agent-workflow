@@ -1,0 +1,21 @@
+import { MemoryRunStore } from "@signal-room/workflow";
+import { createWorkflowReadService } from "@signal-room/workflow-read-model";
+
+const store = new MemoryRunStore();
+const root = await store.createRun({ workflowId: "example.review", workflowRevision: "1", inputFingerprint: "example", state: "running" });
+const phase = await store.createStep({ runId: root.id, key: "review", kind: "phase", workflowId: "example.review", workflowRevision: "1", inputFingerprint: "example", configFingerprint: "example", state: "running", validation: "pending", phaseId: "review", phasePath: ["review"], phaseDefinition: { title: "Independent review", purpose: "Inspect candidate", expectedArtifacts: [{ role: "review", required: true }] } });
+const first = await store.createStep({ runId: root.id, key: "review-first", kind: "agent", workflowId: "example.review", workflowRevision: "1", inputFingerprint: "example", configFingerprint: "example", state: "failed", validation: "invalid", phaseId: "review" });
+await store.createAttempt({ runId: root.id, stepRunId: first.id, state: "failed", error: "Raw private validation failure" });
+const service = createWorkflowReadService({ store, adapters: { title: (kind) => kind === "phase" ? "Independent review" : "Reviewer", error: () => "Output location invalid" } });
+const initial = await service.getSnapshot({ rootRunId: root.id });
+const second = await store.createStep({ runId: root.id, key: "review-second", kind: "agent", workflowId: "example.review", workflowRevision: "1", inputFingerprint: "example", configFingerprint: "example", state: "succeeded", validation: "valid", phaseId: "review" });
+await store.createAttempt({ runId: root.id, stepRunId: second.id, state: "succeeded" });
+await store.appendEvent({ runId: root.id, stepRunId: second.id, type: "read-model.retry", data: { retryOf: first.id, reason: "Output location invalid" } });
+const receipt = await store.publishArtifact({ type: "review", schemaVersion: "1", revision: "1", sha256: "example-hash", uri: "private://review", payload: { result: "no findings" }, producedBy: { workflowRunId: root.id, stepRunId: second.id, attemptId: "example" }, dependsOn: [], validation: "valid", review: "passed" });
+await store.updateStep(phase.id, { state: "succeeded", validation: "valid", artifactBindings: [{ artifact: receipt, role: "review" }] });
+const changes = await service.getChanges({ rootRunId: root.id, cursor: initial.cursor });
+if (changes.resetRequired || changes.changed.calls.find(call => call.id === second.id)?.retryOf !== first.id) throw new Error("Retry projection failed");
+const final = await service.getSnapshot({ rootRunId: root.id });
+if (final.stages[0]?.artifactIds[0] !== receipt.id) throw new Error("Review binding failed");
+if (JSON.stringify(final).includes("private://")) throw new Error("Unsafe artifact URI leaked");
+console.log(`Read-model example passed: ${final.calls.length} calls, ${final.stages.length} phase, ${final.artifacts.length} artifact`);
