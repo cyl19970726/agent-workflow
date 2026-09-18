@@ -110,9 +110,27 @@ describe("workflow read service", () => {
     const exact = (a: typeof old) => ({ id: a.id, revision: a.revision, sha256: a.sha256 });
     const service = createWorkflowReadService({ store, adapters: { relations: a => a.id === review.id ? [{ kind: "reviews", from: exact(review), to: exact(old) }] : [] } });
     await store.updateStep(phase.id, { artifactBindings: [{ artifact: old, role: "candidate" }] });
-    expect((await service.getSnapshot({ rootRunId: root.id })).stages[0]?.review).toBe("passed");
+    const reviewed = await service.getSnapshot({ rootRunId: root.id });
+    expect(reviewed.stages[0]?.review).toBe("passed");
+    expect(reviewed.artifacts.find(a => a.identity.id === old.id)).toMatchObject({ review: "pending", effectiveReview: "passed" });
     await store.updateStep(phase.id, { artifactBindings: [{ artifact: revised, role: "candidate" }] });
-    expect((await service.getSnapshot({ rootRunId: root.id })).stages[0]?.review).toBe("unknown");
+    const revisedView = await service.getSnapshot({ rootRunId: root.id });
+    expect(revisedView.stages[0]?.review).toBe("unknown");
+    expect(revisedView.artifacts.find(a => a.identity.id === revised.id)?.effectiveReview).toBe("unknown");
+  });
+
+  it("preserves a host-reported report-hash mismatch despite exact artifact endpoints", async () => {
+    const store = new MemoryRunStore(); const root = await run(store); const phase = await step(store, root.id, "phase", "review");
+    const call = await step(store, root.id, "agent", "review");
+    const publish = (type: string, hash: string, review: "pending" | "passed") => store.publishArtifact({ type, schemaVersion: "1", revision: "1", sha256: hash, uri: "private", payload: {}, producedBy: { workflowRunId: root.id, stepRunId: call.id, attemptId: "a" }, dependsOn: [], validation: "valid", review });
+    const candidate = await publish("candidate", "candidate-hash", "pending");
+    const receipt = await publish("review", "receipt-hash", "passed");
+    await store.updateStep(phase.id, { artifactBindings: [{ artifact: candidate, role: "candidate" }] });
+    const exact = (a: typeof candidate) => ({ id: a.id, revision: a.revision, sha256: a.sha256 });
+    const view = await createWorkflowReadService({ store, adapters: { relations: a => a.id === receipt.id ? [{ kind: "reviews", from: exact(receipt), to: exact(candidate), validity: "mismatch", reason: "report-hash-mismatch" }] : [] } }).getSnapshot({ rootRunId: root.id });
+    expect(view.relations[0]?.validity).toBe("mismatch");
+    expect(view.stages[0]?.review).toBe("unknown");
+    expect(view.artifacts.find(a => a.identity.id === candidate.id)).toMatchObject({ review: "pending", effectiveReview: "unknown" });
   });
 
   it("stage pages remain stable if new calls appear between pages", async () => {

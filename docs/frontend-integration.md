@@ -57,7 +57,7 @@ const details = await reading.getStageDetails({ rootRunId, phaseId: stage.id, cu
 | `revises` / `supersedes` | 新候选 | 旧候选 |
 | `selected` | 选择依据资产 | 被选定的候选 |
 
-关系的 `validity` 为 `valid`、`missing` 或 `mismatch`。有效 review 只作用于其 `to` 端绑定的候选；修订稿不会继承旧稿的 review。若阶段只有一个明确绑定的候选且有有效 review 关系，阶段审阅状态可从回执的 `review` 事实推导；领域规则还可通过 `phaseFacts` 注入已验证状态。`dependsOn` 自动生成 `consumed`，并不自动表示修订、复核或选定。旧记录缺显式关系时保持 `unknown`。
+关系的 `validity` 为 `valid`、`missing` 或 `mismatch`。宿主可在关系回调中显式返回 `validity: "mismatch"`（例如报告正文哈希与候选不符）；即使两端账本身份吻合，服务也不会把它升级为 valid。有效 review 只作用于其 `to` 端绑定的候选；修订稿不会继承旧稿的 review。资产上的 `review` 是不可变账本原值，`effectiveReview` 是根据精确有效 review 关系得出的下游状态；前者可能仍是 `pending`，后者为 `passed`。若阶段只有一个明确绑定的候选且有有效 review 关系，阶段审阅状态可从回执的 `review` 事实推导；领域规则还可通过 `phaseFacts` 注入已验证状态。`dependsOn` 自动生成 `consumed`，并不自动表示修订、复核或选定。旧记录缺显式关系时保持 `unknown`。
 
 ## 快照、增量与分页
 

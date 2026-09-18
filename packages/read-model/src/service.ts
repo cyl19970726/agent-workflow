@@ -9,7 +9,7 @@ export interface ReadAdapters {
   error?: (attemptId: string, error: string) => string | undefined;
   readerUrl?: (artifact: ArtifactRef) => string | undefined;
   /** Explicit domain facts only; the service never inspects payloads to infer review or selection. */
-  relations?: (artifact: ArtifactRef) => readonly Omit<ArtifactRelation, "validity">[] | Promise<readonly Omit<ArtifactRelation, "validity">[]>;
+  relations?: (artifact: ArtifactRef) => readonly (Omit<ArtifactRelation, "validity"> & { validity?: "mismatch" | "missing" })[] | Promise<readonly (Omit<ArtifactRelation, "validity"> & { validity?: "mismatch" | "missing" })[]>;
   phaseFacts?: (phase: StepRecord) => Partial<Pick<StageView, "review" | "delivery" | "state">> | Promise<Partial<Pick<StageView, "review" | "delivery" | "state">>>;
   callFacts?: (step: StepRecord, events: readonly WorkflowEvent[]) => Partial<Pick<CallView, "model" | "reasoningEffort" | "methodRevision" | "methodDigest">>;
   plan?: (root: RunRecord) => { planned?: number; closed: boolean };
@@ -96,7 +96,7 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
     for (const r of runViews) if (r.diagnostic) diagnostics.push(`${r.diagnostic}:${r.id}`);
     const safeArtifacts: SafeArtifact[] = artifacts.map(a => ({ identity: identity(a), type: a.type, schemaVersion: a.schemaVersion,
       producer: { runId: a.producedBy.workflowRunId, stepId: a.producedBy.stepRunId, attemptId: a.producedBy.attemptId },
-      validation: fact(a.validation), review: fact(a.review), ...(adapters.readerUrl?.(a) ? { readerUrl: adapters.readerUrl(a) } : {}) }));
+      validation: fact(a.validation), review: fact(a.review), effectiveReview: "unknown", ...(adapters.readerUrl?.(a) ? { readerUrl: adapters.readerUrl(a) } : {}) }));
     const relations: ArtifactRelation[] = [];
     for (const a of artifacts) {
       for (const dep of a.dependsOn) {
@@ -106,9 +106,15 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       }
       for (const relation of await adapters.relations?.(a) ?? []) {
         const from = artifactById.get(relation.from.id), to = artifactById.get(relation.to.id);
-        const validity = !from || !to ? "missing" : artifactKeys.has(identityKey(relation.from)) && artifactKeys.has(identityKey(relation.to)) ? "valid" : "mismatch";
+        const ledgerValidity = !from || !to ? "missing" : artifactKeys.has(identityKey(relation.from)) && artifactKeys.has(identityKey(relation.to)) ? "valid" : "mismatch";
+        const validity = ledgerValidity !== "valid" ? ledgerValidity : relation.validity ?? "valid";
         relations.push({ kind: relation.kind, from: relation.from, to: relation.to, ...(relation.reason ? { reason: relation.reason } : {}), validity });
       }
+    }
+    for (const artifact of safeArtifacts) {
+      const states = relations.filter(r => r.kind === "reviews" && r.validity === "valid" && identityKey(r.to) === identityKey(artifact.identity))
+        .map(r => artifactById.get(r.from.id)?.review);
+      artifact.effectiveReview = states.includes("findings") ? "findings" : states.includes("passed") ? "passed" : "unknown";
     }
     const calls: CallView[] = [], stages: StageView[] = [];
     for (const step of allSteps) {

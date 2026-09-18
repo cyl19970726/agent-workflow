@@ -2,7 +2,7 @@
 export type ReadState = "queued" | "running" | "waiting" | "blocked" | "needs_review" | "succeeded" | "failed" | "canceled" | "unknown";
 export type FactState = "unknown" | "pending" | "valid" | "invalid" | "passed" | "findings" | "not_applicable";
 export interface ArtifactIdentity { id: string; revision: string; sha256: string }
-export interface SafeArtifact { identity: ArtifactIdentity; type: string; schemaVersion: string; producer: { runId: string; stepId: string; attemptId: string }; validation: FactState; review: FactState; readerUrl?: string }
+export interface SafeArtifact { identity: ArtifactIdentity; type: string; schemaVersion: string; producer: { runId: string; stepId: string; attemptId: string }; validation: FactState; review: FactState; effectiveReview: FactState; readerUrl?: string }
 export interface ArtifactRelation { kind: "consumed" | "produced" | "reviews" | "revises" | "supersedes" | "selected"; from: ArtifactIdentity; to: ArtifactIdentity; reason?: string; validity: "valid" | "missing" | "mismatch" }
 export interface RunView { id: string; parentRunId?: string; parentStepId?: string; workflowId: string; state: ReadState; childRunIds: string[]; diagnostic?: "missing_parent" | "cycle" }
 export interface AttemptView { id: string; state: ReadState; error?: string; startedAt?: string; endedAt?: string; usage?: { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number } }
