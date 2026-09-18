@@ -15,13 +15,14 @@ npm ci
 npm run verify
 ```
 
-`verify` 会构建三个包、检查文档链接、类型检查 Codex 示例、运行测试，并执行无模型示例。
+`verify` 会构建四个包、检查文档链接、类型检查 Codex 示例、运行测试，并执行无模型示例。
 
 | 示例 | 能看到什么 |
 | --- | --- |
 | [最小并行流程](examples/document-check.mjs) | task、phase、具名并行、恢复时复用结果 |
 | [Builder / Reviewer](examples/review-workflow.mjs) | 无意见交付、一次修订后重新复核、有问题保留 needs_review、精确资产依赖 |
 | [失败后恢复](examples/failure-recovery.mjs) | 保留成功分支资产、只重试失败角色、恢复阶段绑定、区分执行完成与内容仍有意见 |
+| [前端工作台](examples/read-model-web.mjs) | 本机浏览器查看安全快照、失败 attempt、显式重试和增量更新；运行后打开终端显示的地址 |
 | [真实 Codex 接入](examples/codex-workflow.ts) | 显式模型配置、方法内容快照与哈希、独立 cwd、结构校验；默认只类型检查，调用导出函数才会运行模型 |
 
 ## 文档
@@ -32,17 +33,19 @@ npm run verify
 | 编写小流程、并行、阶段、验证和资产 | [编写工作流与 API](docs/writing-workflows.md) |
 | 给每个 Agent 配模型、业务 skill、cwd 和 trace | [Codex 与方法 skill](docs/codex-and-skills.md) |
 | 接入已有队列、持久恢复、API 和阶段工作台 | [宿主集成](docs/integration.md) |
+| 用共享读模型构建浏览器阶段工作台 | [前端读模型集成](docs/frontend-integration.md) |
 
 
-## 三个包
+## 四个包
 
 | 包 | 职责 |
 | --- | --- |
 | `@signal-room/workflow` | 独立于模型提供方的合同、运行时、replay、phase、并行和 MemoryRunStore |
 | `@signal-room/workflow-codex` | Codex SDK 调用、skill 快照、每次 attempt 的私有 trace |
 | `@signal-room/workflow-sqlite` | Node SQLite 执行记录、事件与资产存储 |
+| `@signal-room/workflow-read-model` | 服务端范围查询与安全投影；`/contracts` 是浏览器安全类型入口 |
 
-包通过 npm workspace 消费，当前不发布到 npm registry。浏览器只使用 `@signal-room/workflow/contracts`；服务端使用各包公共入口，不跨目录引用内部源码。
+包通过 npm workspace 消费，当前不发布到 npm registry。浏览器只使用 `/contracts` 类型入口；服务端使用各包公共入口，不跨目录引用内部源码。
 
 ## 多项目共享源码
 

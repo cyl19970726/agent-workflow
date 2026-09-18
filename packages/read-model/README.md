@@ -1,5 +1,7 @@
 # Workflow read model
 
+For the complete transport, cursor, relation, and browser integration guide, see [Frontend integration](../../docs/frontend-integration.md). Run `node examples/read-model-web.mjs` after building to open a no-model browser example.
+
 `@signal-room/workflow-read-model` projects a root run and its actual descendants into browser-safe run, phase, call, attempt, and artifact records. Import DTO types from `@signal-room/workflow-read-model/contracts`; import `createWorkflowReadService` on the server only. Authorize the viewer and the requested root before calling the service.
 
 ```ts

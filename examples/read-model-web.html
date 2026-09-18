@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workflow reading example</title>
+<style>
+  body { max-width: 48rem; margin: 3rem auto; padding: 0 1rem; font: 16px/1.5 system-ui; color: #173042; }
+  button { padding: .5rem .8rem; cursor: pointer; }
+  section { border: 1px solid #cbd5df; border-radius: .5rem; padding: 1rem; margin-top: 1rem; }
+  .muted { color: #516171; }
+</style>
+<h1>Independent review</h1>
+<p class="muted">A browser view built only from the safe read-model DTO. Press the button to publish a retry and receipt.</p>
+<button id="advance">Complete retry</button>
+<main id="view" aria-live="polite"></main>
+<script type="module">
+  const view = document.querySelector("#view");
+  let current;
+  const get = async path => { const response = await fetch(path); if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); };
+  function merge(base, update) {
+    for (const key of ["runs", "stages", "calls", "artifacts"]) {
+      const id = item => key === "artifacts" ? item.identity.id : item.id;
+      const entries = new Map(base[key].map(item => [id(item), item]));
+      for (const removed of update.removed[key]) entries.delete(removed);
+      for (const item of update.changed[key]) entries.set(id(item), item);
+      base[key] = [...entries.values()];
+    }
+    base.relations = update.changed.relations;
+    base.progress = update.changed.progress;
+    base.diagnostics = update.changed.diagnostics;
+    base.cursor = update.cursor;
+  }
+  function line(parent, label, value) {
+    const p = document.createElement("p");
+    p.textContent = `${label}: ${value}`;
+    parent.append(p);
+  }
+  function render() {
+    view.replaceChildren();
+    line(view, "Progress", `${current.progress.completed}/${current.progress.planned ?? "unknown"} phases complete`);
+    for (const stage of current.stages) {
+      const section = document.createElement("section");
+      const heading = document.createElement("h2"); heading.textContent = stage.title; section.append(heading);
+      line(section, "Execution", stage.state);
+      line(section, "Validation", stage.validation);
+      line(section, "Review", stage.review);
+      line(section, "Delivery", stage.delivery);
+      for (const callId of stage.callIds) {
+        const call = current.calls.find(item => item.id === callId);
+        if (!call) continue;
+        line(section, call.title ?? "Call", `${call.state}${call.retryOf ? " (retry of earlier call)" : ""}; ${call.attempts.length} attempt(s)`);
+        for (const attempt of call.attempts) line(section, "Attempt", `${attempt.state}${attempt.error ? ` — ${attempt.error}` : ""}`);
+      }
+      line(section, "Published artifacts", stage.artifactIds.length);
+      view.append(section);
+    }
+  }
+  async function reset() { current = await get("/api/snapshot"); render(); }
+  await reset();
+  document.querySelector("#advance").addEventListener("click", async () => { await get("/api/advance"); await poll(); });
+  async function poll() {
+    try {
+      const update = await get(`/api/changes?cursor=${encodeURIComponent(current.cursor)}`);
+      if (update.resetRequired) return reset();
+      merge(current, update); render();
+    } catch (error) { console.error(error); }
+  }
+  setInterval(poll, 2000);
+</script>
+</html>

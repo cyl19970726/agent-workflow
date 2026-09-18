@@ -145,4 +145,18 @@ describe("workflow read service", () => {
     await store.updateStep(phase.id, { artifactBindings: artifacts.map((artifact, i) => ({ artifact, role: i === 0 ? "evidence" : "receipt" })) });
     expect((await createWorkflowReadService({ store }).getSnapshot({ rootRunId: root.id })).stages[0]).toMatchObject({ state: "canceled", delivery: "unknown" });
   });
+
+  it("coalesces replayed phase controls into one stable stage with all calls", async () => {
+    const store = new MemoryRunStore(); const root = await run(store);
+    const firstPhase = await step(store, root.id, "phase", "review");
+    await store.updateStep(firstPhase.id, { state: "waiting" });
+    const firstCall = await step(store, root.id, "agent", "review");
+    const resumedPhase = await step(store, root.id, "phase", "review");
+    await store.updateStep(resumedPhase.id, { state: "succeeded", validation: "valid" });
+    const secondCall = await step(store, root.id, "agent", "review");
+    const view = await createWorkflowReadService({ store }).getSnapshot({ rootRunId: root.id });
+    expect(view.stages).toHaveLength(1);
+    expect(view.stages[0]).toMatchObject({ id: firstPhase.id, state: "succeeded", validation: "valid", callIds: [firstCall.id, secondCall.id] });
+    expect(view.calls.map(c => c.phaseId)).toEqual([firstPhase.id, firstPhase.id]);
+  });
 });

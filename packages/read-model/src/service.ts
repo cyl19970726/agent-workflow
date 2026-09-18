@@ -68,14 +68,21 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
     const allSteps = [...steps.values()].flat();
     const stepById = new Map(allSteps.map(s => [s.id, s]));
     const runById = new Map(runs.map(r => [r.id, r]));
+    const phaseGroups = new Map<string, StepRecord[]>();
+    for (const step of allSteps) if (step.kind === "phase" && step.phaseId) {
+      const key = `${step.runId}\0${step.phaseId}`;
+      const group = phaseGroups.get(key) ?? [];
+      group.push(step); phaseGroups.set(key, group);
+    }
+    const stageIdOf = (phase: StepRecord): string => phaseGroups.get(`${phase.runId}\0${phase.phaseId}`)?.[0]?.id ?? phase.id;
     const phaseOwner = (step: StepRecord, visited = new Set<string>()): string | undefined => {
       if (visited.has(step.id)) return undefined;
       visited.add(step.id);
-      if (step.kind === "phase") return step.id;
+      if (step.kind === "phase") return stageIdOf(step);
       const siblings = steps.get(step.runId) ?? [];
       const position = siblings.findIndex(s => s.id === step.id);
       const direct = siblings.slice(0, position < 0 ? undefined : position + 1).filter(s => s.kind === "phase" && s.phaseId === step.phaseId).at(-1);
-      if (direct) return direct.id;
+      if (direct) return stageIdOf(direct);
       const parentStep = stepById.get(runById.get(step.runId)?.parentStepRunId ?? "");
       return parentStep ? phaseOwner(parentStep, visited) : undefined;
     };
@@ -119,10 +126,13 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
           reused: ev.some(e => e.stepRunId === step.id && e.type === "step.reused"), attempts: [], artifactIds: artifacts.filter(a => a.producedBy.stepRunId === step.id).map(a => a.id), childRunIds });
       }
       if (step.kind !== "phase" || !step.phaseId) continue;
+      const group = phaseGroups.get(`${step.runId}\0${step.phaseId}`)!;
+      if (group.at(-1)?.id !== step.id) continue;
+      const stableStageId = group[0]!.id;
       const bound = (step.artifactBindings ?? []).filter(b => artifactKeys.has(identityKey(identity(b.artifact))));
       const artifactIds = [...new Set([...bound.map(b => b.artifact.id), ...artifacts.filter(a => {
         const producer = stepById.get(a.producedBy.stepRunId);
-        return producer && phaseOwner(producer) === step.id;
+        return producer && phaseOwner(producer) === stableStageId;
       }).map(a => a.id)])];
       const expectedArtifacts = (step.phaseDefinition?.expectedArtifacts ?? []).map(a => ({ role: a.role, ...(a.title ? { title: a.title } : {}), required: !!a.required, missing: !bound.some(b => b.role === a.role) }));
       const selected = relations.filter(r => r.kind === "selected" && r.validity === "valid" && artifactIds.includes(r.to.id));
@@ -136,13 +146,13 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       const f = await adapters.phaseFacts?.(step);
       const waitingEvent = last(ev.filter(e => e.stepRunId === step.id), "phase.waiting");
       const waitingData = waitingEvent?.data && typeof waitingEvent.data === "object" ? waitingEvent.data as Record<string, unknown> : {};
-      stages.push({ id: step.id, phaseKey: step.phaseId, runId: step.runId, path: [...(step.phasePath ?? [step.phaseId])], title: adapters.title?.("phase", step.phaseId, step) ?? "Phase",
+      stages.push({ id: stableStageId, phaseKey: step.phaseId, runId: step.runId, path: [...(step.phasePath ?? [step.phaseId])], title: adapters.title?.("phase", step.phaseId, step) ?? "Phase",
         purpose: adapters.purpose?.(step) ?? "", ...(step.phaseDefinition?.order !== undefined ? { order: step.phaseDefinition.order } : {}), state: safeFact(f?.state, validStates) ?? (runById.get(step.runId)?.state === "canceled" && step.state === "waiting" ? "canceled" : state(step.state)),
         validation: fact(step.validation), review: safeFact(f?.review, ["unknown", "pending", "passed", "findings", "not_applicable"]) ?? derivedReview,
         delivery: safeFact(f?.delivery, ["unknown", "missing", "ambiguous", "selected"]) ?? delivery,
         ...(typeof waitingData.childRunId === "string" ? { waitingForRunId: waitingData.childRunId } : {}), expectedArtifacts, artifactIds,
-        callIds: calls.filter(c => c.phaseId === step.id).map(c => c.id),
-        ...(eventTime(ev.filter(e => e.stepRunId === step.id), "phase.started") ? { startedAt: eventTime(ev.filter(e => e.stepRunId === step.id), "phase.started") } : {}),
+        callIds: calls.filter(c => c.phaseId === stableStageId).map(c => c.id),
+        ...(eventTime(ev.filter(e => e.stepRunId === group[0]!.id), "phase.started") ? { startedAt: eventTime(ev.filter(e => e.stepRunId === group[0]!.id), "phase.started") } : {}),
         ...(eventTime(ev.filter(e => e.stepRunId === step.id), "phase.completed") ? { endedAt: eventTime(ev.filter(e => e.stepRunId === step.id), "phase.completed") } : {}) });
     }
     for (const stage of stages) stage.callIds = calls.filter(c => c.phaseId === stage.id).map(c => c.id);
