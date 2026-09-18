@@ -21,7 +21,10 @@ const reading = createWorkflowReadService({ store, adapters: {
   purpose: phase => safePurposes.get(phase.id),
   error: (attemptId, rawError) => safeErrorSummaries.get(attemptId),
   readerUrl: artifact => authorizedReaderUrl(artifact),
+  externalArtifact: (identity, root) => authorizedExactArtifact(identity, root),
+  isDeliverable: artifact => isDomainCandidate(artifact),
   callFacts: (step, events) => safeModelFacts(step, events),
+  callArtifacts: (step, artifacts) => verifiedCallArtifacts(step, artifacts),
   relations: async artifact => verifiedRelations(artifact),
   phaseFacts: async phase => verifiedPhaseFacts(phase),
   plan: root => ({ planned: knownPlanSize(root), closed: isPlanClosed(root) }),
@@ -35,7 +38,9 @@ const details = await reading.getStageDetails({ rootRunId, phaseId: stage.id, cu
 
 上面的业务函数由宿主实现。回调收到的原始记录和事件**只在服务端使用**；回调返回的字符串要先脱敏。`title` 和 `purpose` 不会默认取可含私密材料的 workflow 文案；`error` 不会默认传回堆栈或原始错误。`readerUrl` 应签发当前用户有权访问的限定 URL，并约束协议、host 和资源范围。读模型从不打开 URI，也不会代替 HTTP 鉴权。`relations` 由宿主完成 payload/schema 和哈希校验后提交事实；投影只核验关系两端的身份是否匹配账本。`callFacts` 可从 agent 事件提取经允许的模型名、推理配置、方法版本和 digest；未知保持未定义。不要将整段事件或 metadata 透传。
 
-`getSnapshot` 必须显式传入 root。一个嵌套 run 也可成为授权后的局部 root；此时只读它和它的后代，不因相同 project/creator metadata 混入历史兄弟。`selectedRunId` 必须在当前树内。宿主负责跨租户隔离；应先校验 root 所属项目，再访问服务。事件日志、prompt、step output、artifact payload、任意文件路径和原始 URI 都不在浏览器 DTO 内。
+`getSnapshot` 必须显式传入 root。一个嵌套 run 也可成为授权后的局部 root；此时只读它和它的后代，不因相同 project/creator metadata 混入历史兄弟。`selectedRunId` 必须在当前树内。宿主负责跨租户隔离；应先校验 root 所属项目，再访问服务。`externalArtifact` 只为该树中明确引用的精确身份调用（依赖、phase 绑定或领域关系端点），宿主必须核验此 root 对该外部资产的权限。返回的身份必须精确匹配，才会以 `scope: "external"` 出现在资产列表；它的生产 run 不会加入执行树。拒绝时返回 `undefined`，关系保留 `missing`；返回错误身份时标为 `mismatch`。事件日志、prompt、step output、artifact payload、任意文件路径和原始 URI 都不在浏览器 DTO 内。
+
+Agent 输出通常由后续 `publish` 控制步骤写入，账本的 `producedBy.stepRunId` 不一定是 Agent 步骤。宿主可用 `callArtifacts(step, artifacts)` 显式返回 `{inputs, outputs}` 的精确资产身份；读模型只接受与账本 `id + revision + sha256` 全部匹配的引用，填入 `CallView.inputArtifactIds` 和 `artifactIds`。不要凭时间接近或相同 phase 推测某个 Agent 生产了资产。回调中的外部输入仍须经过 `externalArtifact` 权限检查。
 
 ## 状态与身份
 
@@ -43,7 +48,7 @@ const details = await reading.getStageDetails({ rootRunId, phaseId: stage.id, cu
 
 不要把四种状态压成一个“完成”：`state` 是执行状态，`validation` 是结构校验，`review` 是独立复核事实，`delivery` 是交付选择。执行 `succeeded` 不保证候选可交付。`expectedArtifacts.required` 只标记绑定缺失，不改变 run 的执行结果。`waitingForRunId` 表示父阶段等待子运行；`blocked`、`needs_review`、`failed` 和 `canceled` 应分别显示。被取消的 run 上仍为 `waiting` 的阶段投影为 `canceled`。历史资料不足时显示 `unknown`，不要猜“通过”。
 
-`progress.registered` 是实际登记阶段数，`completed` 是成功阶段数；只有宿主明确声明计划数时才有 `planned`。`closed: false` 或缺失 `planned` 时不能渲染固定百分比。阶段同时列出已绑定和同阶段产出的资产，因此第一份候选发布后可以出现，不需等整个 root 终态。多个异类资产不会自动构成候选歧义；只有多个显式 primary 绑定或冲突的 selected 关系才标记 `ambiguous`。没有选定关系时不会按发布时间选最新候选。
+`progress.registered` 是实际登记阶段数，`completed` 是成功阶段数；只有宿主明确声明计划数时才有 `planned`。`closed: false` 或缺失 `planned` 时不能渲染固定百分比。阶段同时列出已绑定和同阶段产出的资产，因此第一份候选发布后可以出现，不需等整个 root 终态。多个异类资产不会自动构成阶段候选歧义；只有多个显式 primary 绑定或冲突的 selected 关系才把阶段标记 `ambiguous`。若宿主提供 `isDeliverable`，快照另有顶层 `delivery`：只从本次树内产物挑选业务候选，零个为 `missing`、单个未选择为 `unknown`、多个未选择为 `ambiguous`、一个有效选择为 `selected`；外部引用及其他类型不计入。没有选定关系时不会按发布时间选最新候选。
 
 ## 精确资产关系
 
@@ -61,7 +66,7 @@ const details = await reading.getStageDetails({ rootRunId, phaseId: stage.id, cu
 
 ## 快照、增量与分页
 
-首屏取 `getSnapshot`，保留 `cursor`。轮询或 SSE 推送时，宿主用同一 root 调 `getChanges`。`resetRequired: true` 表示 cursor 不存在、已被有界缓存淘汰或属于别的 root；重新取快照。成功响应的 `changed.runs/stages/calls/artifacts` 是按稳定 ID upsert 的局部数组，`removed` 中的 ID 要删除；`changed.progress`、`changed.diagnostics` 和 `changed.relations` 是完整当前值，直接替换。请求重试可重复应用同一 upsert 而不会重复计数。
+首屏取 `getSnapshot`，保留 `cursor`。轮询或 SSE 推送时，宿主用同一 root 调 `getChanges`。`resetRequired: true` 表示 cursor 不存在、已被有界缓存淘汰或属于别的 root；重新取快照。成功响应的 `changed.runs/stages/calls/artifacts` 是按稳定 ID upsert 的局部数组，`removed` 中的 ID 要删除；`changed.progress`、`changed.delivery`、`changed.diagnostics` 和 `changed.relations` 是完整当前值，直接替换。请求重试可重复应用同一 upsert 而不会重复计数。
 
 cursor 是服务进程内的随机 opaque token，默认最多保存 64 个，不跨进程/重启共享。负载均衡需要会话粘滞，或在换实例时用 `resetRequired` 重新取快照。每个 run 的事件序号独立；增量按各自水位读取新事件，同时重新查询该 root 的子运行、步骤、资产和状态，所以终态后新发布的资产也可发现。首个快照会读整个所选树的历史，常规增量不会反复读取完整事件历史；这不是跨多个存储调用的事务快照，竞态在下一次轮询中收敛。超过配置的 `maxRuns` 会明确报错，不静默截断。
 

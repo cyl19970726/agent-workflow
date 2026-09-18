@@ -8,6 +8,12 @@ export interface ReadAdapters {
   purpose?: (phase: StepRecord) => string | undefined;
   error?: (attemptId: string, error: string) => string | undefined;
   readerUrl?: (artifact: ArtifactRef) => string | undefined;
+  /** Resolve only an exact referenced identity, after host authorization for this root. */
+  externalArtifact?: (identity: ArtifactIdentity, root: RunRecord) => ArtifactRef | undefined | Promise<ArtifactRef | undefined>;
+  /** Host-only candidate classification; generic artifacts are never assumed deliverable. */
+  isDeliverable?: (artifact: ArtifactRef) => boolean;
+  /** Explicit call input/output references; only exact ledger identities are exposed. */
+  callArtifacts?: (step: StepRecord, artifacts: readonly ArtifactRef[]) => { inputs?: readonly ArtifactIdentity[]; outputs?: readonly ArtifactIdentity[] } | Promise<{ inputs?: readonly ArtifactIdentity[]; outputs?: readonly ArtifactIdentity[] }>;
   /** Explicit domain facts only; the service never inspects payloads to infer review or selection. */
   relations?: (artifact: ArtifactRef) => readonly (Omit<ArtifactRelation, "validity"> & { validity?: "mismatch" | "missing" })[] | Promise<readonly (Omit<ArtifactRelation, "validity"> & { validity?: "mismatch" | "missing" })[]>;
   phaseFacts?: (phase: StepRecord) => Partial<Pick<StageView, "review" | "delivery" | "state">> | Promise<Partial<Pick<StageView, "review" | "delivery" | "state">>>;
@@ -63,7 +69,8 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
     return { runs, steps, artifacts, events, watermarks };
   }
   async function project(rootRunId: string, data: Awaited<ReturnType<typeof collect>>): Promise<WorkflowSnapshot> {
-    const { runs, steps, artifacts, events } = data;
+    const { runs, steps, events } = data;
+    const artifacts = [...data.artifacts];
     const runIds = new Set(runs.map(r => r.id));
     const allSteps = [...steps.values()].flat();
     const stepById = new Map(allSteps.map(s => [s.id, s]));
@@ -86,27 +93,55 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       const parentStep = stepById.get(runById.get(step.runId)?.parentStepRunId ?? "");
       return parentStep ? phaseOwner(parentStep, visited) : undefined;
     };
+    const explicitRelations = new Map<string, readonly (Omit<ArtifactRelation, "validity"> & { validity?: "mismatch" | "missing" })[]>();
+    const callArtifactFacts = new Map<string, { inputs?: readonly ArtifactIdentity[]; outputs?: readonly ArtifactIdentity[] }>();
+    const referenced = new Map<string, ArtifactIdentity>();
+    for (const artifact of artifacts) {
+      for (const dep of artifact.dependsOn) { const ref = { id: dep.artifactId, revision: dep.revision, sha256: dep.sha256 }; referenced.set(identityKey(ref), ref); }
+      const declared = await adapters.relations?.(artifact) ?? [];
+      explicitRelations.set(artifact.id, declared);
+      for (const relation of declared) { referenced.set(identityKey(relation.from), relation.from); referenced.set(identityKey(relation.to), relation.to); }
+    }
+    for (const step of allSteps) for (const binding of step.artifactBindings ?? []) {
+      const ref = identity(binding.artifact);
+      referenced.set(identityKey(ref), ref);
+    }
+    if (adapters.callArtifacts) for (const step of allSteps) if (step.kind === "agent" || step.kind === "workflow") {
+      const facts = await adapters.callArtifacts(step, data.artifacts);
+      callArtifactFacts.set(step.id, facts);
+      for (const ref of [...facts.inputs ?? [], ...facts.outputs ?? []]) referenced.set(identityKey(ref), ref);
+    }
     const artifactById = new Map(artifacts.map(a => [a.id, a]));
     const artifactKeys = new Set(artifacts.map(a => identityKey(identity(a))));
+    const mismatchedExternalIds = new Set<string>();
+    const externalIds = new Set<string>();
+    for (const ref of referenced.values()) {
+      if (artifactKeys.has(identityKey(ref)) || artifactById.has(ref.id)) continue;
+      const resolved = await adapters.externalArtifact?.(ref, runs[0]!);
+      if (!resolved) continue;
+      if (identityKey(identity(resolved)) !== identityKey(ref)) { mismatchedExternalIds.add(ref.id); continue; }
+      artifacts.push(resolved); artifactById.set(resolved.id, resolved);
+      artifactKeys.add(identityKey(ref)); externalIds.add(ref.id);
+    }
     const diagnostics: string[] = [];
     const runViews: RunView[] = runs.map(r => ({ id: r.id, workflowId: r.workflowId, state: state(r.state),
       ...(r.parentRunId ? { parentRunId: r.parentRunId } : {}), ...(r.parentStepRunId ? { parentStepId: r.parentStepRunId } : {}),
       childRunIds: runs.filter(c => c.parentRunId === r.id).map(c => c.id),
       ...(r.id !== rootRunId && r.parentRunId && (!runIds.has(r.parentRunId) || (r.parentStepRunId && !stepById.has(r.parentStepRunId))) ? { diagnostic: "missing_parent" as const } : {}) }));
     for (const r of runViews) if (r.diagnostic) diagnostics.push(`${r.diagnostic}:${r.id}`);
-    const safeArtifacts: SafeArtifact[] = artifacts.map(a => ({ identity: identity(a), type: a.type, schemaVersion: a.schemaVersion,
+    const safeArtifacts: SafeArtifact[] = artifacts.map(a => ({ identity: identity(a), type: a.type, schemaVersion: a.schemaVersion, scope: externalIds.has(a.id) ? "external" : "produced",
       producer: { runId: a.producedBy.workflowRunId, stepId: a.producedBy.stepRunId, attemptId: a.producedBy.attemptId },
       validation: fact(a.validation), review: fact(a.review), effectiveReview: "unknown", ...(adapters.readerUrl?.(a) ? { readerUrl: adapters.readerUrl(a) } : {}) }));
     const relations: ArtifactRelation[] = [];
-    for (const a of artifacts) {
+    for (const a of data.artifacts) {
       for (const dep of a.dependsOn) {
         const target = artifactById.get(dep.artifactId);
         relations.push({ kind: "consumed", from: { id: dep.artifactId, revision: dep.revision, sha256: dep.sha256 }, to: identity(a),
-          validity: !target ? "missing" : identityKey(identity(target)) === identityKey({ id: dep.artifactId, revision: dep.revision, sha256: dep.sha256 }) ? "valid" : "mismatch" });
+          validity: !target ? mismatchedExternalIds.has(dep.artifactId) ? "mismatch" : "missing" : identityKey(identity(target)) === identityKey({ id: dep.artifactId, revision: dep.revision, sha256: dep.sha256 }) ? "valid" : "mismatch" });
       }
-      for (const relation of await adapters.relations?.(a) ?? []) {
+      for (const relation of explicitRelations.get(a.id) ?? []) {
         const from = artifactById.get(relation.from.id), to = artifactById.get(relation.to.id);
-        const ledgerValidity = !from || !to ? "missing" : artifactKeys.has(identityKey(relation.from)) && artifactKeys.has(identityKey(relation.to)) ? "valid" : "mismatch";
+        const ledgerValidity = !from || !to ? mismatchedExternalIds.has(relation.from.id) || mismatchedExternalIds.has(relation.to.id) ? "mismatch" : "missing" : artifactKeys.has(identityKey(relation.from)) && artifactKeys.has(identityKey(relation.to)) ? "valid" : "mismatch";
         const validity = ledgerValidity !== "valid" ? ledgerValidity : relation.validity ?? "valid";
         relations.push({ kind: relation.kind, from: relation.from, to: relation.to, ...(relation.reason ? { reason: relation.reason } : {}), validity });
       }
@@ -124,12 +159,15 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
         const link = retry?.data && typeof retry.data === "object" ? retry.data as Record<string, unknown> : {};
         const childRunIds = runs.filter(r => r.parentStepRunId === step.id).map(r => r.id);
         const inheritedPhase = phaseOwner(step);
+        const declared = callArtifactFacts.get(step.id);
+        const exactIds = (refs: readonly ArtifactIdentity[] | undefined) => (refs ?? []).filter(ref => artifactKeys.has(identityKey(ref))).map(ref => ref.id);
+        const directOutputs = artifacts.filter(a => a.producedBy.stepRunId === step.id).map(a => a.id);
         calls.push({ id: step.id, stepId: step.id, runId: step.runId, ...(inheritedPhase ? { phaseId: inheritedPhase } : {}), role: step.kind,
           state: state(step.state), validation: fact(step.validation), ...(adapters.title?.("call", step.id, step) ? { title: adapters.title("call", step.id, step) } : {}),
           ...adapters.callFacts?.(step, ev.filter(e => e.stepRunId === step.id)),
           ...(typeof link.retryOf === "string" ? { retryOf: link.retryOf } : {}), ...(typeof link.reason === "string" ? { retryReason: adapters.error?.(step.id, link.reason) } : {}),
-          inputArtifactIds: relations.filter(r => r.kind === "consumed" && artifacts.some(a => a.producedBy.stepRunId === step.id && a.id === r.to.id)).map(r => r.from.id),
-          reused: ev.some(e => e.stepRunId === step.id && e.type === "step.reused"), attempts: [], artifactIds: artifacts.filter(a => a.producedBy.stepRunId === step.id).map(a => a.id), childRunIds });
+          inputArtifactIds: [...new Set([...relations.filter(r => r.kind === "consumed" && directOutputs.includes(r.to.id) && r.validity === "valid").map(r => r.from.id), ...exactIds(declared?.inputs)])],
+          reused: ev.some(e => e.stepRunId === step.id && e.type === "step.reused"), attempts: [], artifactIds: [...new Set([...directOutputs, ...exactIds(declared?.outputs)])], childRunIds });
       }
       if (step.kind !== "phase" || !step.phaseId) continue;
       const group = phaseGroups.get(`${step.runId}\0${step.phaseId}`)!;
@@ -163,9 +201,16 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
     }
     for (const stage of stages) stage.callIds = calls.filter(c => c.phaseId === stage.id).map(c => c.id);
     const plan = adapters.plan?.(runs[0]!);
+    const candidates = adapters.isDeliverable ? data.artifacts.filter(a => adapters.isDeliverable!(a)) : [];
+    const candidateIds = new Set(candidates.map(a => a.id));
+    const selectedIds = [...new Set(relations.filter(r => r.kind === "selected" && r.validity === "valid" && candidateIds.has(r.to.id)).map(r => r.to.id))];
+    const delivery = adapters.isDeliverable ? {
+      state: (selectedIds.length > 1 ? "ambiguous" : selectedIds.length === 1 ? "selected" : candidates.length > 1 ? "ambiguous" : candidates.length === 1 ? "unknown" : "missing") as "missing" | "unknown" | "ambiguous" | "selected",
+      artifactIds: selectedIds.length ? selectedIds : candidates.map(a => a.id),
+    } : undefined;
     return { schemaVersion: 1, rootRunId, cursor: "", runs: runViews, stages, calls, artifacts: safeArtifacts, relations,
       progress: { registered: stages.length, completed: stages.filter(s => s.state === "succeeded").length,
-        ...(plan?.planned !== undefined ? { planned: plan.planned } : {}), closed: plan?.closed ?? false }, diagnostics };
+        ...(plan?.planned !== undefined ? { planned: plan.planned } : {}), closed: plan?.closed ?? false }, ...(delivery ? { delivery } : {}), diagnostics };
   }
   async function snapshot(rootRunId: string, prior?: CursorEntry): Promise<{ dto: WorkflowSnapshot; watermarks: Record<string, number>; events: Map<string, WorkflowEvent[]> }> {
     const data = await collect(rootRunId, prior);

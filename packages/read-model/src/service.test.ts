@@ -177,4 +177,60 @@ describe("workflow read service", () => {
     expect(view.stages[0]).toMatchObject({ id: firstPhase.id, state: "succeeded", validation: "valid", callIds: [firstCall.id, secondCall.id] });
     expect(view.calls.map(c => c.phaseId)).toEqual([firstPhase.id, firstPhase.id]);
   });
+
+  it("resolves an authorized external dependency without expanding the execution tree", async () => {
+    const store = new MemoryRunStore(); const root = await run(store); const outside = await run(store);
+    const sourceStep = await step(store, outside.id, "agent");
+    const source = await store.publishArtifact({ type: "source", schemaVersion: "1", revision: "1", sha256: "source-hash", uri: "private://source", payload: {}, producedBy: { workflowRunId: outside.id, stepRunId: sourceStep.id, attemptId: "a" }, dependsOn: [], validation: "valid", review: "not_applicable" });
+    const producer = await step(store, root.id, "agent");
+    await store.publishArtifact({ type: "candidate", schemaVersion: "1", revision: "1", sha256: "candidate-hash", uri: "private://candidate", payload: {}, producedBy: { workflowRunId: root.id, stepRunId: producer.id, attemptId: "b" }, dependsOn: [{ artifactId: source.id, revision: source.revision, sha256: source.sha256 }], validation: "valid", review: "pending" });
+    const seen: string[] = [];
+    const service = createWorkflowReadService({ store, adapters: { externalArtifact: async (ref, requestedRoot) => { seen.push(`${ref.id}:${requestedRoot.id}`); return store.getArtifact(ref.id); } } });
+    const view = await service.getSnapshot({ rootRunId: root.id });
+    expect(view.runs.map(r => r.id)).toEqual([root.id]);
+    expect(view.artifacts.find(a => a.identity.id === source.id)?.scope).toBe("external");
+    expect(view.relations.find(r => r.kind === "consumed")?.validity).toBe("valid");
+    expect(seen).toEqual([`${source.id}:${root.id}`]);
+    expect(JSON.stringify(view)).not.toContain("private://");
+  });
+
+  it("keeps denied and mismatched external references unresolved", async () => {
+    const store = new MemoryRunStore(); const root = await run(store); const phase = await step(store, root.id, "phase", "review");
+    const producer = await step(store, root.id, "agent", "review");
+    const external = { id: "foreign", revision: "1", sha256: "expected" };
+    await store.publishArtifact({ type: "candidate", schemaVersion: "1", revision: "1", sha256: "candidate", uri: "private", payload: {}, producedBy: { workflowRunId: root.id, stepRunId: producer.id, attemptId: "a" }, dependsOn: [{ artifactId: external.id, revision: external.revision, sha256: external.sha256 }], validation: "valid", review: "pending" });
+    await store.updateStep(phase.id, { state: "succeeded" });
+    const denied = await createWorkflowReadService({ store, adapters: { externalArtifact: () => undefined } }).getSnapshot({ rootRunId: root.id });
+    expect(denied.relations.find(r => r.kind === "consumed")?.validity).toBe("missing");
+    expect(denied.artifacts.some(a => a.identity.id === external.id)).toBe(false);
+    const wrong = await createWorkflowReadService({ store, adapters: { externalArtifact: () => ({ id: "foreign", revision: "1", sha256: "wrong", type: "source", schemaVersion: "1", uri: "private", producedBy: { workflowRunId: "outside", stepRunId: "outside", attemptId: "outside" }, dependsOn: [], validation: "valid", review: "pending" }) } }).getSnapshot({ rootRunId: root.id });
+    expect(wrong.relations.find(r => r.kind === "consumed")?.validity).toBe("mismatch");
+    expect(wrong.artifacts.some(a => a.identity.id === external.id)).toBe(false);
+  });
+
+  it("reports ambiguous deliverable branches until an exact selection, ignoring other artifact types", async () => {
+    const store = new MemoryRunStore(); const root = await run(store); const producer = await step(store, root.id, "agent");
+    const publish = (type: string, hash: string) => store.publishArtifact({ type, schemaVersion: "1", revision: "1", sha256: hash, uri: "private", payload: {}, producedBy: { workflowRunId: root.id, stepRunId: producer.id, attemptId: "a" }, dependsOn: [], validation: "valid", review: "pending" });
+    await publish("evidence", "e");
+    const candidate1 = await publish("candidate", "c1");
+    const service = createWorkflowReadService({ store, adapters: { isDeliverable: a => a.type === "candidate" } });
+    expect((await service.getSnapshot({ rootRunId: root.id })).delivery).toEqual({ state: "unknown", artifactIds: [candidate1.id] });
+    const candidate2 = await publish("candidate", "c2");
+    expect((await service.getSnapshot({ rootRunId: root.id })).delivery).toEqual({ state: "ambiguous", artifactIds: [candidate1.id, candidate2.id] });
+    const selection = await publish("selection", "s");
+    const exact = (a: typeof selection) => ({ id: a.id, revision: a.revision, sha256: a.sha256 });
+    const selected = createWorkflowReadService({ store, adapters: { isDeliverable: a => a.type === "candidate", relations: a => a.id === selection.id ? [{ kind: "selected", from: exact(selection), to: exact(candidate2) }] : [] } });
+    expect((await selected.getSnapshot({ rootRunId: root.id })).delivery).toEqual({ state: "selected", artifactIds: [candidate2.id] });
+  });
+
+  it("binds agent inputs and publish-step outputs only through exact host-declared identities", async () => {
+    const store = new MemoryRunStore(); const root = await run(store); const agent = await step(store, root.id, "agent");
+    const publisher = await store.createStep({ runId: root.id, key: "publish", kind: "publish", workflowId: "flow", workflowRevision: "1", inputFingerprint: "private", configFingerprint: "private", state: "succeeded", validation: "valid" });
+    const source = await store.publishArtifact({ type: "source", schemaVersion: "1", revision: "1", sha256: "source", uri: "private", payload: {}, producedBy: { workflowRunId: root.id, stepRunId: publisher.id, attemptId: "a" }, dependsOn: [], validation: "valid", review: "not_applicable" });
+    const output = await store.publishArtifact({ type: "candidate", schemaVersion: "1", revision: "1", sha256: "output", uri: "private", payload: {}, producedBy: { workflowRunId: root.id, stepRunId: publisher.id, attemptId: "b" }, dependsOn: [], validation: "valid", review: "pending" });
+    const exact = (a: typeof source) => ({ id: a.id, revision: a.revision, sha256: a.sha256 });
+    const service = createWorkflowReadService({ store, adapters: { callArtifacts: s => s.id === agent.id ? { inputs: [exact(source)], outputs: [exact(output), { ...exact(source), sha256: "wrong" }] } : {} } });
+    const view = await service.getSnapshot({ rootRunId: root.id });
+    expect(view.calls[0]).toMatchObject({ inputArtifactIds: [source.id], artifactIds: [output.id] });
+  });
 });
