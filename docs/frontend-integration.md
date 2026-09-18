@@ -8,6 +8,8 @@ npm run build
 node examples/read-model-web.mjs
 ```
 
+命令行完整工作流示例：`node examples/read-model.mjs`（无意见）以及 `node examples/read-model.mjs --repair`（修订一次，修订稿保持未复核）。它使用真实 runtime 和模拟 Agent，恢复时复用已完成 Builder，失败 Reviewer 保留在账本。两种模式都由 `npm run verify` 执行。
+
 在终端显示的本机地址打开页面，按「Complete retry」可看到 Reviewer 的失败 attempt、显式重试和新产物。服务端与浏览器代码分别在 [`read-model-web.mjs`](../examples/read-model-web.mjs) 和 [`read-model-web.html`](../examples/read-model-web.html)。示例只绑定 `127.0.0.1`，没有用户体系；生产环境必须在每个 HTTP 请求上先验证身份、项目权限和 root 权限。
 
 ## 服务端边界
