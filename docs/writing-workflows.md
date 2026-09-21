@@ -85,6 +85,8 @@ if (!checked.valid) {
 
 `validate` 通过对象身份把结果绑定到生产它的 Agent 步骤；对象被复制、反序列化或存在歧义时，使用 `producerStepKey` 明确生产者。schema 校验只说明结构满足合同，不能证明事实正确、证据充分或研究有用。质量复核应是独立业务步骤，并绑定确切候选版本。
 
+若要判断某个 Reviewer、Builder 或整条流程是否有效，应另设评估协议：冻结案例与证据，对照被测版本，并由流程外的独立判据裁定。流程内质量复核是被测对象之一，不是 workflow 自身有效性的证明。参见 [Workflow 评估指南](./evaluating-workflows.md)。
+
 ## 发布不可变资产
 
 ```ts

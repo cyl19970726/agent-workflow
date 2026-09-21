@@ -21,6 +21,7 @@ npm run verify
 | --- | --- |
 | [最小并行流程](examples/document-check.mjs) | task、phase、具名并行、恢复时复用结果 |
 | [Builder / Reviewer](examples/review-workflow.mjs) | 无意见交付、一次修订后重新复核、有问题保留 needs_review、精确资产依赖 |
+| [Workflow 对照实验](examples/workflow-experiment.mjs) | 同一冻结案例比较两个版本；把独立 oracle 放在被测 workflow 之外；不调用真实模型 |
 | [失败后恢复](examples/failure-recovery.mjs) | 保留成功分支资产、只重试失败角色、恢复阶段绑定、区分执行完成与内容仍有意见 |
 | [前端工作台](examples/read-model-web.mjs) | 本机浏览器查看安全快照、失败 attempt、显式重试和增量更新；运行后打开终端显示的地址 |
 | [真实 Codex 接入](examples/codex-workflow.ts) | 显式模型配置、方法内容快照与哈希、独立 cwd、结构校验；默认只类型检查，调用导出函数才会运行模型 |
@@ -32,6 +33,7 @@ npm run verify
 | 在新项目中安装、运行第一个流程 | [快速开始](docs/getting-started.md) |
 | 编写小流程、并行、阶段、验证和资产 | [编写工作流与 API](docs/writing-workflows.md) |
 | 给每个 Agent 配模型、业务 skill、cwd 和 trace | [Codex 与方法 skill](docs/codex-and-skills.md) |
+| 评估 workflow 自身的质量、稳定性和效率 | [Workflow 评估指南](docs/evaluating-workflows.md) |
 | 接入已有队列、持久恢复、API 和阶段工作台 | [宿主集成](docs/integration.md) |
 | 用共享读模型构建浏览器阶段工作台 | [前端读模型集成](docs/frontend-integration.md) |
 
