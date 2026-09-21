@@ -1,5 +1,7 @@
 # 接入宿主应用
 
+接入前用 [设计](./designing-workflows.md)、[评估](./evaluating-workflows.md)、[优化](./optimizing-workflows.md)三份指南明确意图、交付和验收。方法建议与库已实现能力分别记录；下面说明现有执行基础设施的边界。
+
 共享库是执行内核和账本合同，不是完整的工作台后端。宿主应用仍拥有唯一任务队列、租约、worker 并发策略、业务资产注册、HTTP 权限和 UI 读模型。
 
 ## 推荐组合

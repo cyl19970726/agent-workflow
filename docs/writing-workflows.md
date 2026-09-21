@@ -1,5 +1,7 @@
 # 编写工作流
 
+本篇讲具体 API。决定阶段、步骤、资产和返工边界时先读 [设计指南](./designing-workflows.md)；验证方法效果及迭代取舍分别见 [评估](./evaluating-workflows.md)与[优化](./optimizing-workflows.md)。
+
 浏览器展示阶段时使用共享 [前端读模型](./frontend-integration.md)，不要把原始步骤、事件或 artifact URI 直接交给页面。
 
 工作流是普通的异步 TypeScript 函数。顺序、条件与有界循环使用语言本身表达；需要记录、复用或隔离副作用的工作通过 `ctx` 方法执行。
