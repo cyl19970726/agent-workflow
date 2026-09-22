@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,7 +29,7 @@ function writeSkill(root: string, reference: string): string {
   return skill;
 }
 
-function readingFactory(observed: Array<{ cwd: string; mode: number; output: Record<string, unknown> }>): CodexSdkFactory {
+function readingFactory(observed: Array<{ cwd: string; mode: number; output: Record<string, unknown>; prompt: string }>): CodexSdkFactory {
   return { create: () => ({
     startThread: (options: ThreadOptions) => {
       const cwd = options.workingDirectory!;
@@ -38,10 +39,13 @@ function readingFactory(observed: Array<{ cwd: string; mode: number; output: Rec
         script: fs.readFileSync(path.join(staged, "scripts", "probe.sh"), "utf8"),
         binary: [...fs.readFileSync(path.join(staged, "assets", "sample.bin"))]
       };
-      observed.push({ cwd, mode: fs.statSync(path.join(staged, "scripts", "probe.sh")).mode & 0o777, output });
-      return { id: `thread-${observed.length}`, runStreamed: async (_input: Input) => ({ events: (async function* () {
+      return { id: `thread-${observed.length + 1}`, runStreamed: async (input: Input) => {
+        observed.push({ cwd, mode: fs.statSync(path.join(staged, "scripts", "probe.sh")).mode & 0o777, output,
+          prompt: typeof input === "string" ? input : JSON.stringify(input) });
+        return { events: (async function* () {
         yield ({ type: "item.completed", item: { id: "answer", type: "agent_message", text: JSON.stringify(output) } } as ThreadEvent);
-      })() }) };
+        })() };
+      } };
     },
     resumeThread: () => { throw new Error("unexpected resume"); }
   }) as never };
@@ -64,7 +68,7 @@ describe("native skill package workflow", () => {
     const firstBundle = snapshotSkill(source);
     fs.rmSync(path.join(root, "source"), { recursive: true, force: true });
 
-    const observed: Array<{ cwd: string; mode: number; output: Record<string, unknown> }> = [];
+    const observed: Array<{ cwd: string; mode: number; output: Record<string, unknown>; prompt: string }> = [];
     const runner = new CodexSdkRunner(readingFactory(observed), path.join(root, "traces"), { cliBinary: "missing-codex" });
     const makeFlow = (bundle: FrozenSkillBundle, outputDirectory: string) => workflow("skill-package", { revision: "1" }, async (ctx) => {
       const output = await ctx.agent("read", skillAgent(bundle, outputDirectory), null);
@@ -76,6 +80,7 @@ describe("native skill package workflow", () => {
 
     expect(first.output).toEqual({ reference: "reference-v1", script: "#!/bin/sh\nprintf staged-script", binary: [0, 255, 1, 128] });
     expect(observed[0]).toMatchObject({ cwd: path.join(root, "output-v1"), mode: 0o700 });
+    expect(observed[0]!.prompt).toContain("Read each SKILL.md below and follow its instructions.");
     expect(fs.existsSync(source)).toBe(false);
 
     const changedSource = writeSkill(root, "reference-v2");
@@ -107,11 +112,21 @@ describe("native skill package workflow", () => {
       .rejects.toThrow("CODEX_SDK_RESUME_FINGERPRINT_MISMATCH");
   });
 
-  it("stages the complete containing package when a legacy caller requires only a nested reference", () => {
+  it("stages a complete package for a selected operator without activating the package SKILL.md", () => {
     const root = temporaryRoot();
     const source = writeSkill(root, "nested-reference");
+    const operator = path.join(source, "references", "method.md");
+    const schema = path.join(source, "schemas", "single-post-depth.schema.json");
+    const externalContract = path.join(root, "contracts", "result.schema.json");
+    fs.mkdirSync(path.dirname(schema), { recursive: true });
+    fs.mkdirSync(path.dirname(externalContract), { recursive: true });
+    fs.writeFileSync(operator, `Use ${path.join(source, "scripts", "probe.sh")} and ${path.join(source, "assets", "sample.bin")}.`);
+    fs.writeFileSync(schema, JSON.stringify({ type: "object" }));
+    fs.writeFileSync(externalContract, "{}");
     const output = path.join(root, "legacy-output");
-    const result = attachVerifiedSkillSnapshots("Follow the method.", [path.join(source, "references", "method.md")],
+    const result = attachVerifiedSkillSnapshots(
+      `Do NOT read SKILL.md or evaluation.md. Read only ${operator} and ${schema}. Keep contract ${externalContract}.`,
+      [operator, schema],
       { outputDirectory: output });
     const staged = path.join(output, ".agents", "skills", "complete-method");
 
@@ -119,6 +134,27 @@ describe("native skill package workflow", () => {
     expect(fs.readFileSync(path.join(staged, "scripts", "probe.sh"), "utf8")).toContain("staged-script");
     expect([...fs.readFileSync(path.join(staged, "assets", "sample.bin"))]).toEqual([0, 255, 1, 128]);
     expect(result.receipt.packages).toEqual([expect.objectContaining({ root: staged })]);
-    expect(result.prompt).toContain(path.join(staged, "SKILL.md"));
+    expect(result.prompt).not.toContain("Read each SKILL.md below");
+    expect(result.prompt).toContain("Do not treat the package SKILL.md as an additional instruction entrypoint");
+    expect(result.prompt).toContain(path.join(staged, "references", "method.md"));
+    expect(result.prompt).toContain(path.join(staged, "schemas", "single-post-depth.schema.json"));
+    expect(result.prompt).toContain(path.join(staged, "scripts", "probe.sh"));
+    expect(result.prompt).toContain(path.join(staged, "assets", "sample.bin"));
+    expect(result.prompt).toContain(externalContract);
+    expect(result.prompt).not.toContain(source);
+    expect(result.receipt.files[0]).toMatchObject({ path: operator,
+      effectivePath: path.join(staged, "references", "method.md") });
+    expect(result.receipt.files[1]).toMatchObject({ path: schema,
+      effectivePath: path.join(staged, "schemas", "single-post-depth.schema.json") });
+    const stagedOperator = fs.readFileSync(path.join(staged, "references", "method.md"));
+    const originalDigest = crypto.createHash("sha256").update(stagedOperator).digest("hex");
+    const projectedOperator = `Use ${path.join(staged, "scripts", "probe.sh")} and ${path.join(staged, "assets", "sample.bin")}.`;
+    const effectiveDigest = crypto.createHash("sha256").update(projectedOperator).digest("hex");
+    expect(result.receipt.files[0]).toMatchObject({ sha256: originalDigest, effectiveSha256: effectiveDigest });
+    expect(result.receipt.files[0]!.sha256).not.toBe(result.receipt.files[0]!.effectiveSha256);
+    expect(result.prompt).toContain(projectedOperator);
+
+    fs.writeFileSync(operator, "mutated after snapshot");
+    expect(fs.readFileSync(path.join(staged, "references", "method.md"), "utf8")).not.toContain("mutated");
   });
 });

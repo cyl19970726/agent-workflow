@@ -99,7 +99,20 @@ export type CodexSdkSkillSnapshot = {
 export type SkillLoadReceipt = {
   loading: "effective_prompt_snapshot" | "native_skill_packages";
   packages?: MaterializedSkill[];
-  files: Array<{ path: string; sha256: string; bytes: number; promptAnchor: string }>;
+  files: Array<{
+    /** Original source path retained for receipt compatibility and provenance. */
+    path: string;
+    sha256: string;
+    bytes: number;
+    promptAnchor: string;
+    /**
+     * Path and text digest presented in the effective prompt after package-path projection.
+     * The staged file itself keeps the original bundle bytes recorded by sha256/bytes above.
+     */
+    effectivePath?: string;
+    effectiveSha256?: string;
+    effectiveBytes?: number;
+  }>;
   effectivePromptSha256: string;
 };
 
@@ -110,7 +123,7 @@ export function attachVerifiedSkillSnapshots(prompt: string, requiredPaths: read
   if (requiredPaths.length === 0) {
     return { prompt, receipt: { loading: "effective_prompt_snapshot" as const, files: [], effectivePromptSha256: sha256(prompt) } };
   }
-  const files = requiredPaths.map((requestedPath, index) => {
+  const files = requiredPaths.map((requestedPath) => {
     const absolute = path.resolve(requestedPath);
     let content: string;
     try { content = fs.readFileSync(absolute, "utf8"); }
@@ -119,31 +132,47 @@ export function attachVerifiedSkillSnapshots(prompt: string, requiredPaths: read
       throw error;
     }
     if (!content.trim()) throw new Error(`CODEX_SKILL_REQUIRED_FILE_EMPTY:${absolute}`);
-    const promptAnchor = `skill-snapshot-${index + 1}:${sha256(content)}`;
-    return { path: absolute, content, sha256: sha256(content), bytes: Buffer.byteLength(content), promptAnchor };
+    return { path: absolute, content, sha256: sha256(content), bytes: Buffer.byteLength(content) };
   });
-  const packages = options ? stageRequiredSkillPackages(requiredPaths, options.outputDirectory) : [];
-  const effectivePrompt = `${prompt}${packageInstructions(packages)}
+  const staged = options ? stageRequiredSkillPackages(requiredPaths, options.outputDirectory) : { packages: [], roots: [] };
+  const projectPackagePaths = (value: string): string => staged.roots
+    .sort((left, right) => right.sourceRoot.length - left.sourceRoot.length)
+    .reduce((projected, root) => {
+      if (projected === root.sourceRoot) return root.materializedRoot;
+      return projected.split(`${root.sourceRoot}${path.sep}`).join(`${root.materializedRoot}${path.sep}`);
+    }, value);
+  const effectiveFiles = files.map((file, index) => {
+    const effectivePath = projectPackagePaths(file.path);
+    const effectiveContent = projectPackagePaths(file.content);
+    return { ...file, effectivePath, effectiveContent,
+      effectiveSha256: sha256(effectiveContent), effectiveBytes: Buffer.byteLength(effectiveContent),
+      promptAnchor: `skill-snapshot-${index + 1}:${sha256(effectiveContent)}` };
+  });
+  const effectivePrompt = `${projectPackagePaths(prompt)}${operatorPackageInstructions(staged.packages)}
 
 ## Verified required method snapshots
-${files.map((file) =>
+${effectiveFiles.map((file) =>
     `<!-- ${file.promptAnchor} -->
-Path: ${file.path}
-SHA-256: ${file.sha256}
+Path: ${file.effectivePath}
+SHA-256: ${file.effectiveSha256}
 \`\`\`text
-${file.content}
+${file.effectiveContent}
 \`\`\``
   ).join("\n\n")}`;
   return { prompt: effectivePrompt, receipt: {
     loading: "effective_prompt_snapshot",
-    ...(packages.length ? { packages } : {}),
-    files: files.map(({ path: filePath, sha256: digest, bytes, promptAnchor }) => ({ path: filePath, sha256: digest, bytes, promptAnchor })),
+    ...(staged.packages.length ? { packages: staged.packages } : {}),
+    files: effectiveFiles.map(({ path: filePath, sha256: digest, bytes, promptAnchor, effectivePath, effectiveSha256, effectiveBytes }) =>
+      ({ path: filePath, sha256: digest, bytes, promptAnchor, effectivePath, effectiveSha256, effectiveBytes })),
     effectivePromptSha256: sha256(effectivePrompt)
   } };
 }
 
-/** Stage whole containing packages for legacy callers that explicitly select method files. */
-function stageRequiredSkillPackages(requiredPaths: readonly string[], outputDirectory: string): MaterializedSkill[] {
+/** Stage whole containing packages for callers that explicitly select operator or schema files. */
+function stageRequiredSkillPackages(requiredPaths: readonly string[], outputDirectory: string): {
+  packages: MaterializedSkill[];
+  roots: Array<{ sourceRoot: string; materializedRoot: string }>;
+} {
   const roots = new Set<string>();
   for (const file of requiredPaths) {
     let directory = path.dirname(path.resolve(file));
@@ -155,7 +184,18 @@ function stageRequiredSkillPackages(requiredPaths: readonly string[], outputDire
     }
   }
   if (roots.size) fs.mkdirSync(path.resolve(outputDirectory), { recursive: true, mode: 0o700 });
-  return [...roots].map((root) => stageSkill(snapshotSkill(root), path.resolve(outputDirectory)));
+  const staged = [...roots].map((sourceRoot) => ({ sourceRoot,
+    materialized: stageSkill(snapshotSkill(sourceRoot), path.resolve(outputDirectory)) }));
+  return {
+    packages: staged.map(({ materialized }) => materialized),
+    roots: staged.map(({ sourceRoot, materialized }) => ({ sourceRoot, materializedRoot: materialized.root }))
+  };
+}
+
+function operatorPackageInstructions(packages: readonly MaterializedSkill[]): string {
+  if (!packages.length) return "";
+  return `\n\n## Frozen resources for the selected method files\nThe selected method snapshots below are the role instructions. Their complete containing packages are available at the frozen directories below for relative references, scripts, schemas, and assets. Read those resources only when the selected method or task requires them. Do not treat the package SKILL.md as an additional instruction entrypoint unless the prompt explicitly selects it.\n${packages.map((skill) =>
+    `- ${skill.root} (tree SHA-256: ${skill.sha256})`).join("\n")}`;
 }
 
 function packageInstructions(packages: readonly MaterializedSkill[], cwd?: string): string {

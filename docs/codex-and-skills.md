@@ -49,7 +49,9 @@ runner 在 SDK 启动前把包还原到 `<workingDirectory>/.agents/skills/<name
 
 树摘要包含相对路径、文件内容和权限，reference、脚本、素材的变更都会改变摘要。将 `skill.sha256` 写入 `skillsRevision`。任何方法、嵌套模型或 prompt 变化还必须提升 workflow revision 并开启新 run：core 可以复用整个已完成 phase/group，不会执行其内部闭包重新发现依赖。线程 resume 也要求完整指纹一致。
 
-已有低层适配器可用 `attachVerifiedSkillSnapshots(prompt, requiredPaths, { outputDirectory })`：它从所选文件向上找到最近的 SKILL.md，冻结并交付整个包，同时保留旧的指定文本与收据。务必传入实际 SDK cwd；两参数旧接口仅交付文本，不具备完整 skill 加载语义。
+已有低层适配器可用 `attachVerifiedSkillSnapshots(prompt, requiredPaths, { outputDirectory })`。这是“选定 operator/schema 文件”模式：所选文件全文作为角色指令；适配器从它们向上找到最近的 SKILL.md，冻结并交付整个包，使 references、scripts、assets 与 schemas 仍可按需读取，但不会额外要求模型读取主 SKILL.md。原 prompt 和所选文本中指向这些包的绝对源路径会投影到冻结副本，包外合同路径保持不变。冻结目录中的文件始终保留 bundle 原始字节，不会为了提示词投影而改写。收据的 `path`、`sha256`、`bytes` 记录原始来源以及与之相同的冻结文件字节；`effectivePath`、`effectiveSha256`、`effectiveBytes` 只记录实际呈现在 prompt 中的路径和投影后文本。务必传入实际 SDK cwd；两参数旧接口仅交付文本，不具备完整包资源与路径投影语义。
+
+需要以 SKILL.md 作为原生入口时，使用 `snapshotSkill(...)` 并把 bundle 放入 `config.skills`。该模式仍明确要求模型读取冻结副本中的 SKILL.md。不要把这两种入口模式混用：业务 prompt 明确选择 operator 时，应调用 `attachVerifiedSkillSnapshots`；任务明确选择整个 skill 时，应使用 `config.skills`。
 
 不同 skill 应使用不同目录名。建议每次 attempt 使用独立 cwd；若显式复用 outputDirectory，已有同名包必须与本次快照完全一致，否则报错，不会覆盖、混合或遗留上一版本文件。运行期间需要修改的文件应写到输出目录，不能修改冻结的 skill 包。文件私有权限为 0600，带执行位的脚本为 0700。
 
