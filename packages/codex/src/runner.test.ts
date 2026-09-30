@@ -2,8 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Input, ThreadEvent, ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-import { CodexSdkRunner, invokeCodexSdk, type CodexSdkFactory } from "./runner.js";
+import type { CodexOptions, Input, ThreadEvent, ThreadOptions, TurnOptions } from "@openai/codex-sdk";
+import { CodexSdkRunner, invokeCodexSdk, probeCodexModel, type CodexSdkFactory } from "./runner.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
@@ -113,5 +113,58 @@ describe("CodexSdkRunner", () => {
     }) as never };
     const runner = new CodexSdkRunner(factory, path.join(root, "traces"));
     await expect(runner.run(request({ prompt: "build" }))).rejects.toThrow("CODEX_SDK_TURN_FAILED:denied");
+  });
+
+  it("gives each agent its own Codex config over the runner's options and records what ran", async () => {
+    const root = temporaryRoot();
+    const created: Array<CodexOptions | undefined> = [];
+    async function* events() { yield ({ type: "item.completed", item: { id: "m1", type: "agent_message", text: "{}" } } as ThreadEvent); }
+    const factory: CodexSdkFactory = { create: (options) => {
+      created.push(options);
+      return { startThread: () => ({ id: "thread", runStreamed: async () => ({ events: events() }) }),
+        resumeThread: () => { throw new Error("unexpected resume"); } } as never;
+    } };
+    const runner = new CodexSdkRunner(factory, path.join(root, "traces"),
+      { codexOptions: { codexPathOverride: "/opt/codex/bin/codex", config: { "features.apps": false, project_doc_max_bytes: 4096 } } });
+    await runner.run(request({ prompt: "write", codexConfig: { project_doc_max_bytes: 0 } }));
+    expect(created).toEqual([{ codexPathOverride: "/opt/codex/bin/codex", config: { "features.apps": false, project_doc_max_bytes: 0 } }]);
+    const runtime = JSON.parse(fs.readFileSync(path.join(root, "traces", "run-1", "step-1", "attempt-1", "runtime.json"), "utf8"));
+    expect(runtime.codexPath).toBe("/opt/codex/bin/codex");
+    expect(runtime.codexConfig).toEqual({ "features.apps": false, project_doc_max_bytes: 0 });
+  });
+
+  it("keeps an agent's fingerprint unchanged when it has no Codex config of its own", async () => {
+    const fingerprints: string[] = [];
+    async function* events() { yield ({ type: "item.completed", item: { id: "m1", type: "agent_message", text: "{}" } } as ThreadEvent); }
+    const factory: CodexSdkFactory = { create: () => ({ startThread: () => ({ id: "thread", runStreamed: async () => ({ events: events() }) }),
+      resumeThread: () => { throw new Error("unexpected resume"); } }) as never };
+    for (const runnerOptions of [{}, { codexOptions: { config: { project_doc_max_bytes: 0 } } }]) {
+      const root = temporaryRoot();
+      await new CodexSdkRunner(factory, path.join(root, "traces"), runnerOptions).run(request({ prompt: "write" }));
+      fingerprints.push(JSON.parse(fs.readFileSync(path.join(root, "traces", "run-1", "step-1", "attempt-1", "runtime.json"), "utf8")).fingerprint);
+    }
+    expect(fingerprints[0]).toBe(fingerprints[1]);
+  });
+});
+
+describe("probeCodexModel", () => {
+  it("reports a model the login can use", async () => {
+    let threadOptions: ThreadOptions | undefined;
+    async function* events() { yield ({ type: "item.completed", item: { id: "m1", type: "agent_message", text: "OK" } } as ThreadEvent); }
+    const factory: CodexSdkFactory = { create: () => ({ startThread: (options: ThreadOptions) => {
+      threadOptions = options; return { id: "thread", runStreamed: async () => ({ events: events() }) };
+    }, resumeThread: () => { throw new Error("unexpected resume"); } }) as never };
+    const probe = await probeCodexModel({ model: "gpt-6-sol", factory, runnerOptions: { cliBinary: "missing-codex" } });
+    expect(probe).toMatchObject({ ok: true, model: "gpt-6-sol", reasoningEffort: "low", codexRuntimeVersion: "unknown" });
+    expect(threadOptions?.sandboxMode).toBe("read-only");
+  });
+
+  it("reports why a model is refused instead of throwing", async () => {
+    async function* events() { yield ({ type: "turn.failed", error: { message: "model not supported for this account" } } as ThreadEvent); }
+    const factory: CodexSdkFactory = { create: () => ({ startThread: () => ({ id: "thread", runStreamed: async () => ({ events: events() }) }),
+      resumeThread: () => { throw new Error("unexpected resume"); } }) as never };
+    const probe = await probeCodexModel({ model: "gpt-6-sol", factory, runnerOptions: { cliBinary: "missing-codex" } });
+    expect(probe.ok).toBe(false);
+    expect(probe.error).toContain("model not supported for this account");
   });
 });

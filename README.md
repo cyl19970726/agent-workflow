@@ -4,6 +4,22 @@
 
 本库从 self-media 提交 `c460d1cd` 抽离；设计背景见 [Issue #71](https://github.com/cyl19970726/self-media-content-intelligence/issues/71)。该 Issue 包含设计草案和宿主产品要求，当前 API 与能力边界以这里的代码、文档和测试为准。
 
+## 核心思想：workflow 是调出来的
+
+把一项业务完整交给 workflow，不是一次设计到位，而是**先做一个最简单、能真跑的第一版，再一轮一轮调优**。第一版一定会错，错法事先猜不到，大部分只有在 trace 里才看得见。每一轮：
+
+1. 在**同一份冻结输入**上真跑，按业务标准评估产物；
+2. **读 trace 和资产**：每个角色收到了什么、做了什么、交出了什么；
+3. 把问题归到一层（输入与交接、角色、标准与审阅者、流程结构、运行环境），**只改这一处并升版本**，用同一输入重跑对比。
+
+调优过程中要逐步定下三件事：
+
+- **看哪些 trace 和资产**才能判断每个角色做得对不对；
+- **关键流程怎么划分**，在工作台里怎么清楚地显示（按阶段一行：决定 → 主资产 → 判决 → 进度 → 历史）；
+- **哪些资产给用户看**，哪些只进审计层，哪些永不暴露。
+
+内容始终由 workflow 里的 Agent 产出；主持调优的人或 Agent 只编排、评估和改 workflow，不替它补内容。具体做法见 **[调优循环](docs/tuning-loop.md)**；本库为此提供的支持：step key 防重复、按角色设置 Codex 环境、开跑前模型探针、trace 摘要与会话定位（见 [Codex 与 Skills](docs/codex-and-skills.md)），尚未解决的问题见 [Harness 路线](docs/harness-roadmap.md)。
+
 ## 先跑起来
 
 需要 Node.js ≥22.5。以下步骤不会调用真实模型：
@@ -28,7 +44,7 @@ npm run verify
 
 ## 文档
 
-方法主线：**[设计](docs/designing-workflows.md) → [评估](docs/evaluating-workflows.md) → [优化](docs/optimizing-workflows.md) → 新版设计**。设计支持从历史 session 重建，也支持从新意图出发；评估规则在设计时同步确定。三份指南与 API 用法分开阅读，当前不是自动优化框架。
+方法主线：**[设计](docs/designing-workflows.md) → [评估](docs/evaluating-workflows.md) → [优化](docs/optimizing-workflows.md) → 新版设计**，一轮具体怎么做见 [调优循环](docs/tuning-loop.md)。设计支持从历史 session 重建，也支持从新意图出发；评估规则在设计时同步确定。三份指南与 API 用法分开阅读，当前不是自动优化框架。
 
 | 你要做什么 | 从这里开始 |
 | --- | --- |
@@ -38,6 +54,8 @@ npm run verify
 | 给每个 Agent 配模型、业务 skill、cwd 和 trace | [Codex 与方法 skill](docs/codex-and-skills.md) |
 | 评估 workflow 自身的质量、稳定性和效率 | [Workflow 评估指南](docs/evaluating-workflows.md) |
 | 根据失败归因和对照实验改进流程 | [优化 Workflow](docs/optimizing-workflows.md) |
+| 一轮调优的实际步骤：冻结输入、读 trace、归因、重跑、定工作台显示 | [调优循环](docs/tuning-loop.md) |
+| 调优中暴露的 harness 问题及进展 | [Harness 路线](docs/harness-roadmap.md) |
 | 接入已有队列、持久恢复、API 和阶段工作台 | [宿主集成](docs/integration.md) |
 | 用共享读模型构建浏览器阶段工作台 | [前端读模型集成](docs/frontend-integration.md) |
 
@@ -47,7 +65,7 @@ npm run verify
 | 包 | 职责 |
 | --- | --- |
 | `@signal-room/workflow` | 独立于模型提供方的合同、运行时、replay、phase、并行和 MemoryRunStore |
-| `@signal-room/workflow-codex` | Codex SDK 调用、skill 快照、每次 attempt 的私有 trace |
+| `@signal-room/workflow-codex` | Codex SDK 调用、按角色的 Codex 环境、skill 快照、每次 attempt 的私有 trace 及其摘要、模型探针 |
 | `@signal-room/workflow-sqlite` | Node SQLite 执行记录、事件与资产存储 |
 | `@signal-room/workflow-read-model` | 服务端范围查询与安全投影；`/contracts` 是浏览器安全类型入口 |
 

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
@@ -20,6 +21,15 @@ export type CodexInstalledVersionsOptions = {
   packageRoot?: string;
   /** Executable used to identify the Codex runtime. Defaults to `codex`. */
   cliBinary?: string;
+};
+
+/**
+ * Runner-wide settings. `codexOptions` reaches every SDK client the runner creates; when it names a
+ * `codexPathOverride` and no `cliBinary` is given, that same executable is the one whose version is
+ * recorded, so a trace never reports a different Codex than the one that ran.
+ */
+export type CodexSdkRunnerOptions = CodexInstalledVersionsOptions & {
+  codexOptions?: CodexOptions;
 };
 
 function installedPackageVersion(packageName: string, packageRoot?: string): string {
@@ -217,6 +227,12 @@ export type CodexSdkAgentConfig = {
   outputDirectory?: string;
   timeoutMs?: number;
   threadOptions?: Omit<ThreadOptions, "model" | "modelReasoningEffort" | "workingDirectory">;
+  /**
+   * Codex `--config` overrides for this agent only, merged over the runner's `codexOptions.config`.
+   * Use it to shape one role's environment, e.g. `{ project_doc_max_bytes: 0 }` so a writing role
+   * is not handed the repository's engineering AGENTS.md.
+   */
+  codexConfig?: NonNullable<CodexOptions["config"]>;
   resume?: {
     requested: true;
     threadId: string;
@@ -380,11 +396,62 @@ export async function invokeCodexSdk(
   }
 }
 
+/** Codex client options for one agent: runner-wide options with the agent's own config merged on top. */
+export function codexOptionsFor(runnerOptions: CodexOptions | undefined, agentConfig: CodexSdkAgentConfig["codexConfig"]): CodexOptions | undefined {
+  if (!agentConfig) return runnerOptions;
+  return { ...runnerOptions, config: { ...runnerOptions?.config, ...agentConfig } };
+}
+
+function versionOptions(options: CodexSdkRunnerOptions): CodexInstalledVersionsOptions {
+  return { packageRoot: options.packageRoot, cliBinary: options.cliBinary ?? options.codexOptions?.codexPathOverride };
+}
+
+export type CodexModelProbe = {
+  ok: boolean;
+  model: string;
+  reasoningEffort: string;
+  codexRuntimeVersion: string;
+  durationMs: number;
+  error?: string;
+};
+
+/**
+ * Starts one tiny read-only turn to find out whether this Codex executable and login can use a model.
+ * Run it before a workflow: an account that cannot use the model fails here in seconds instead of
+ * failing inside a run, where the host agent tends to take the work over by hand.
+ */
+export async function probeCodexModel(options: {
+  model: string;
+  reasoningEffort?: string;
+  factory?: CodexSdkFactory;
+  runnerOptions?: CodexSdkRunnerOptions;
+  timeoutMs?: number;
+}): Promise<CodexModelProbe> {
+  const reasoning = options.reasoningEffort ?? "low";
+  const runnerOptions = options.runnerOptions ?? {};
+  const started = Date.now();
+  const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-model-probe-"));
+  const base = { model: options.model, reasoningEffort: reasoning, codexRuntimeVersion: codexInstalledVersions(versionOptions(runnerOptions)).codexRuntimeVersion };
+  try {
+    const result = await invokeCodexSdk(options.factory ?? defaultCodexSdkFactory, {
+      prompt: "Reply with the single word OK.", outputDir, role: "model-probe", model: options.model, reasoningEffort: reasoning,
+      signal: new AbortController().signal, timeoutMs: options.timeoutMs ?? 120_000, codexOptions: runnerOptions.codexOptions,
+      threadOptions: { sandboxMode: "read-only" }
+    });
+    const ok = result.finalResponse.trim().length > 0;
+    return { ...base, ok, durationMs: Date.now() - started, ...(ok ? {} : { error: "empty response" }) };
+  } catch (error) {
+    return { ...base, ok: false, durationMs: Date.now() - started, error: (error instanceof Error ? error.message : String(error)).slice(0, 1_000) };
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+}
+
 export class CodexSdkRunner implements AgentRunner {
   constructor(
     private readonly factory: CodexSdkFactory = defaultCodexSdkFactory,
     private readonly traceRoot: string = path.join(process.cwd(), ".workflow", "traces", "codex-sdk"),
-    private readonly runtimeOptions: CodexInstalledVersionsOptions = {}
+    private readonly runtimeOptions: CodexSdkRunnerOptions = {}
   ) {}
 
   async run<InputValue, Output>(request: AgentRunRequest<InputValue>): Promise<AgentRunResult<Output>> {
@@ -421,11 +488,16 @@ export class CodexSdkRunner implements AgentRunner {
     const fingerprint = sha256(stableJson({ role: definition.id, revision: definition.revision, model: definition.model,
       reasoningEffort: definition.reasoningEffort, prompt: effectivePrompt,
       skills: skills.map((skill) => "kind" in skill ? { name: skill.name, sha256: skill.sha256 } : skill), input: request.input,
-      permissionsRevision: definition.permissionsRevision }));
+      permissionsRevision: definition.permissionsRevision,
+      // Only present when set, so fingerprints of agents without their own Codex config stay unchanged.
+      ...(config.codexConfig ? { codexConfig: config.codexConfig } : {}) }));
+    const codexOptions = codexOptionsFor(this.runtimeOptions.codexOptions, config.codexConfig);
     const runtime = {
       agent: { id: definition.id, revision: definition.revision }, runId: request.runId, stepRunId: request.stepRunId,
       attemptId: request.attemptId, model: definition.model, reasoningEffort: definition.reasoningEffort,
-      ...codexInstalledVersions(this.runtimeOptions), outputDirectory: outputDir,
+      ...codexInstalledVersions(versionOptions(this.runtimeOptions)), outputDirectory: outputDir,
+      codexPath: codexOptions?.codexPathOverride ?? "sdk-bundled", codexConfig: codexOptions?.config ?? {},
+      threadOptions: config.threadOptions ?? {},
       promptRevision: definition.promptRevision, skillsRevision: definition.skillsRevision,
       permissionsRevision: definition.permissionsRevision, fingerprint, skillLoad,
       resumed: Boolean(config.resume?.requested)
@@ -451,7 +523,7 @@ export class CodexSdkRunner implements AgentRunner {
         prompt: effectivePrompt, outputDir, role: definition.id, model: definition.model,
         reasoningEffort: definition.reasoningEffort, outputSchema: config.outputSchema, timeoutMs: config.timeoutMs,
         lastMessage: path.join(attemptDir, "last-message.txt"), signal: request.signal,
-        threadOptions: config.threadOptions, resume,
+        threadOptions: config.threadOptions, codexOptions, resume,
         observer: async (event) => {
           appendPrivate(path.join(attemptDir, "events.jsonl"), `${JSON.stringify(event)}\n`);
           await request.emit("agent.event", publicEvent(event));

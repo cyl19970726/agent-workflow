@@ -26,7 +26,14 @@ export interface RunWorkflowResult<Output> {
   output?: Output;
 }
 
-type RuntimeSharedState = { pending: Promise<void>[]; producerSteps: WeakMap<object, string[]> };
+type RuntimeSharedState = { pending: Promise<void>[]; producerSteps: WeakMap<object, string[]>; executedKeys: Set<string> };
+
+/**
+ * Step kinds whose second use of a key in one execution would be answered from the first step's record
+ * without running the callback. A phase is fingerprinted by its definition, so a repeated key with the
+ * same title silently skips its work (seen in a consumer: a revision was reported as applied but never ran).
+ */
+const KEYS_UNIQUE_PER_EXECUTION = new Set<StepKind>(["phase", "agent", "task", "workflow", "map", "parallel"]);
 type PhaseScope = { phaseId: string; phasePath: readonly string[]; controlStepId: string;
   ownerRunId: string; bindings: PhaseArtifactBinding[] };
 
@@ -91,7 +98,7 @@ class RuntimeContext implements WorkflowContext {
   constructor(private readonly store: RunStore, private readonly runner: AgentRunner, private readonly run: RunRecord, private readonly signal: AbortSignal,
     private readonly childDispatcher?: ChildWorkflowDispatcher, shared?: RuntimeSharedState,
     private readonly phaseScope?: PhaseScope) {
-    this.shared = shared ?? { pending: [], producerSteps: new WeakMap<object, string[]>() };
+    this.shared = shared ?? { pending: [], producerSteps: new WeakMap<object, string[]>(), executedKeys: new Set<string>() };
   }
 
   async task<Input, Output>(key: string, implementation: TaskImplementation<Input, Output>, input: Input): Promise<Output> {
@@ -120,6 +127,7 @@ class RuntimeContext implements WorkflowContext {
     this.assertActive();
     assertKey(key);
     const stepKey = this.scopedKey(key);
+    this.claimKey(stepKey, "workflow");
     const inputFingerprint = workflowFingerprint(input);
     const configFingerprint = `${definition.id}:${definition.revision}:durable-child-v1`;
     const matches = (await this.store.listSteps(this.run.id)).filter((step) => step.key === stepKey && step.kind === "workflow"
@@ -317,6 +325,7 @@ class RuntimeContext implements WorkflowContext {
     this.assertActive();
     assertKey(key);
     const stepKey = this.scopedKey(key);
+    this.claimKey(stepKey, kind);
     const inputFingerprint = workflowFingerprint(input);
     const query = { runId: this.run.id, workflowId: this.run.workflowId, workflowRevision: this.run.workflowRevision,
       key: stepKey, kind, inputFingerprint, configFingerprint };
@@ -360,6 +369,7 @@ class RuntimeContext implements WorkflowContext {
         throw error;
       }
       const state = this.signal.aborted ? "canceled" : "failed";
+      this.shared.executedKeys.delete(`${kind}:${stepKey}`);
       await this.store.updateStep(step.id, { state, error: safeError(error) });
       await this.store.updateAttempt(attempt.id, { state, error: safeError(error) });
       await emit("step.failed", { error: safeError(error) });
@@ -394,6 +404,15 @@ class RuntimeContext implements WorkflowContext {
   }
   private phaseRecord(): Partial<Pick<StepRecord, "phaseId" | "phasePath">> {
     return this.phaseScope ? { phaseId: this.phaseScope.phaseId, phasePath: this.phaseScope.phasePath } : {};
+  }
+  private claimKey(stepKey: string, kind: StepKind): void {
+    if (!KEYS_UNIQUE_PER_EXECUTION.has(kind)) return;
+    const claim = `${kind}:${stepKey}`;
+    if (this.shared.executedKeys.has(claim)) {
+      throw new Error(`Step key "${stepKey}" (${kind}) was already used in this execution. Keys must be unique within a run; `
+        + "a repeated key would return the earlier step's result without running this one.");
+    }
+    this.shared.executedKeys.add(claim);
   }
   private scopedKey(key: string): string {
     return this.phaseScope ? [...this.phaseScope.phasePath, key].join(":") : key;
