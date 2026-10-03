@@ -189,6 +189,10 @@ Phase 不创建调度器，不占模型槽，也不会自动成为事务或全�
 
 闭包捕获值不会被完整识别。task、validator、phase/并行分支回调、嵌套模型/prompt/skill 配置或流程逻辑改变时，必须提升 workflow revision，并以新 run 执行；旧 run 只恢复原来的精确定义。把外部副作用放进有 key 的 `task`、`agent` 或 `call`，并使用幂等键。
 
+### 一次执行内 key 不能重复
+
+`phase`、`agent`、`task`、`call`、`mapSettled` 与 `parallel` 的 key 在同一次执行里只能用一次；key 按所在 phase 的作用域计算，不同 phase 里的同名 key 互不冲突。重复使用会直接失败并报出 key。原因：phase 的输入是它的定义，第二个同 key phase 的指纹与第一个相同，会原样拿回第一次的结果，回调根本不执行；流程看起来“改完了”，实际没有改。循环里的轮次用计数器生成 key（`draft-1`、`draft-2`…），不要用“当前是第几次修订”这种从输入推出来、跨轮次会重复的值。`decide`、`validate`、`publish` 允许重复 key。失败后在同一次执行里用同一 key 重试也允许。
+
 ## Issue #71 草案与当前 API 对照
 
 [self-media #71](https://github.com/cyl19970726/self-media-content-intelligence/issues/71) 是本库的设计动机与产品集成目标，不是已交付能力清单。主要落点如下：

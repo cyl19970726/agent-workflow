@@ -197,6 +197,45 @@ describe("workflow runtime", () => {
       .toHaveLength(3);
   });
 
+  it("rejects a repeated phase key in one execution instead of silently returning the first phase", async () => {
+    const store = new MemoryRunStore();
+    let bodies = 0;
+    const flow = workflow("repeated-phase", { revision: "1" }, async (ctx) => {
+      const same = { title: "Revise draft", purpose: "Apply the editor's notes" };
+      await ctx.phase("draft-1", same, async (phase) => { bodies++; return phase.task("write", () => "first", 1); });
+      return ctx.phase("draft-1", same, async (phase) => { bodies++; return phase.task("write", () => "second", 2); });
+    });
+    await expect(runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent }))
+      .rejects.toThrow(/Step key "draft-1" \(phase\) was already used in this execution/);
+    expect((await store.listRuns())[0]?.state).toBe("failed");
+    expect(bodies).toBe(1);
+  });
+
+  it("allows repeated decision keys and a retry after a step that threw", async () => {
+    const store = new MemoryRunStore();
+    let attempts = 0;
+    const flow = workflow("retry-in-execution", { revision: "1" }, async (ctx) => {
+      ctx.decide("route", "a");
+      ctx.decide("route", "b");
+      const attempt = () => ctx.task("flaky", () => { attempts++; if (attempts === 1) throw new Error("transient"); return "ok"; }, null);
+      try { return await attempt(); } catch { return attempt(); }
+    });
+    const result = await runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent });
+    expect(result.run.state).toBe("succeeded");
+    expect(result.output).toBe("ok");
+  });
+
+  it("replays the same phase keys when a run is resumed", async () => {
+    const store = new MemoryRunStore();
+    let bodies = 0;
+    const flow = workflow("resume-phase", { revision: "1" }, (ctx) =>
+      ctx.phase("build", { title: "Build", purpose: "Build once" }, async (phase) => { bodies++; return phase.task("make", () => "done", null); }));
+    const first = await runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent });
+    const resumed = await runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent, resumeRunId: first.run.id });
+    expect(resumed.run.state).toBe("succeeded");
+    expect(bodies).toBe(1);
+  });
+
   it("persists nested phase definitions, scoped steps, events, and artifact bindings", async () => {
     const store = new MemoryRunStore();
     const flow = workflow("phased", { revision: "1" }, (ctx) => ctx.phase("outer", {

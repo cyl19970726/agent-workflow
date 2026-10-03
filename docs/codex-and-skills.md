@@ -76,6 +76,48 @@ WORKFLOW_SMOKE_MODEL=gpt-5.6-luna node examples/skill-package-smoke.mjs
 
 workflow 输入会稳定序列化后嵌入 prompt，并写入私有 `input.json`。图片不是 `CodexSdkRunner` 的高层 Agent 配置项；需要低层图片调用的现有适配器可使用 `invokeCodexSdk` 的 `imagePaths`。
 
+## 每个角色的运行环境
+
+一个 Agent 看到的不只是 prompt：Codex 还会注入沿途目录的 `AGENTS.md`、用户级 `~/.codex/AGENTS.md`、用户级 skills，以及浏览器、computer-use 等工具。写作、审稿这类非工程角色拿到工程协作规范后，会把“区分事实与推断”“写明限制”写进内容里。角色环境要显式设置，并且以 trace 首条注入为准核对，不以宿主环境为准。
+
+```ts
+const runner = new CodexSdkRunner(undefined, traceRoot, {
+  // 所有 Agent 共用：指定实际使用的 Codex 可执行文件；trace 记录的就是它的版本。
+  codexOptions: { codexPathOverride: "/path/to/codex", config: { project_doc_max_bytes: 0 } }
+});
+
+const writer = defineAgent({
+  id: "writer", revision: "v3", model: "gpt-6-sol", reasoningEffort: "medium",
+  config: {
+    prompt: "…",
+    threadOptions: { sandboxMode: "read-only", webSearchMode: "disabled" },
+    // 只对这个角色生效，合并在 runner 的 codexOptions.config 之上。
+    codexConfig: { project_doc_max_bytes: 0 }
+  }
+});
+```
+
+| 要控制的东西 | 设置位置 | 说明 |
+| --- | --- | --- |
+| 使用哪个 Codex CLI | runner `codexOptions.codexPathOverride` | 未另给 `cliBinary` 时，记录的版本就取自这个可执行文件 |
+| 仓库 `AGENTS.md` 注入 | `codexConfig` / `codexOptions.config` 的 `project_doc_max_bytes: 0` | 用户级 `~/.codex/AGENTS.md` 仍会注入，无法按调用关闭；需要时在角色 prompt 里声明它不适用 |
+| 读写范围 | `threadOptions.sandboxMode`、`additionalDirectories` | 产出文件的角色给 `workspace-write` 与工程目录；其他角色只读 |
+| 联网与搜索 | `threadOptions.webSearchMode`、`networkAccessEnabled` | 只给需要查资料的角色 |
+| 其他 Codex 配置 | `codexConfig` | 原样作为 `--config` 覆盖传给 CLI；只有设置了才进入 fingerprint |
+
+给 Agent 的工具提示（“可以用某脚本自检”）必须在**它自己的沙箱里**实际跑通过一次。宿主能用的命令，在无网络的只读或工作区沙箱里可能挂住；Agent 随后会自己找替代工具，把一次调用耗到超时。
+
+### 开跑前确认模型可用
+
+```ts
+import { probeCodexModel } from "@signal-room/workflow-codex";
+
+const probe = await probeCodexModel({ model: "gpt-6-sol", runnerOptions: { codexOptions } });
+if (!probe.ok) throw new Error(`${probe.model} 不可用（${probe.codexRuntimeVersion}）：${probe.error}`);
+```
+
+探针用只读沙箱发一次极短调用，返回可用与否、实际 CLI 版本和拒绝原因，不抛异常。账号不支持某模型时，在运行开始前几秒内就能发现；否则失败发生在 run 中途，宿主 Agent 往往会自己接手把活做完，workflow 就被绕过了。
+
 ## 可追溯配置与私有 trace
 
 每次 attempt 会记录：
@@ -85,7 +127,20 @@ workflow 输入会稳定序列化后嵌入 prompt，并写入私有 `input.json`
 - SDK 包版本和所选 Codex CLI/runtime 版本；
 - output directory、输入/prompt/skill 哈希与整体 fingerprint；
 - Codex thread ID、公开事件投影、token usage（不可用时为 `null`）；
+- 实际使用的 Codex 可执行文件路径、合并后的 Codex 配置与 thread 选项；
 - 原始事件 JSONL、最终响应和指定文件收据。
+
+### 读 trace
+
+```ts
+import { codexSessionFile, summarizeCodexAttempt } from "@signal-room/workflow-codex";
+
+const attempt = summarizeCodexAttempt(attemptDir, { ignoreErrors: /unrecognized configuration setting/ });
+// { agentId, model, codexRuntimeVersion, state, usage, chars, items, searches, commands, filesChanged, errors, … }
+const session = attempt.threadId ? codexSessionFile(attempt.threadId, { startedAt }) : undefined;
+```
+
+`summarizeCodexAttempt` 把一个 attempt 目录变成调优要看的事实：执行了哪些命令、哪些失败、搜了什么、改了哪些文件、读写了多少字符、遇到什么错误。`ignoreErrors` 过滤每次调用都会出现的本机配置噪音。`codexSessionFile` 按 thread id 找到完整的 Codex 会话文件，用于逐行查证。不要按“最新修改的会话文件”去找：同一台机器上其他项目的会话会被误认成这个 Agent。
 
 trace 文件权限设为私有，并应保留在宿主的私有运行目录。不要从通用资产端点直接暴露 prompt、原始工具输出、凭据、任意本地路径或完整 JSONL。工作台只读取安全投影。
 
