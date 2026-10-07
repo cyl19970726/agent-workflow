@@ -2,6 +2,8 @@
 
 `@signal-room/workflow-codex` 把 Codex TypeScript SDK 接到通用 `AgentRunner` 端口。工作流负责何时调用 Agent；runner 负责一次模型执行、私有 trace 和运行收据。研究方法、模型选择和质量门槛仍由消费项目定义。
 
+**本文描述当前文件型 runner。** 新共享服务要求 Codex 默认把可观察执行过程、配置、资产和来源接入统一存储，详见[Codex 接入的默认行为](postgres-sdk-plan.md#51-codex-接入的默认行为)。目前原生详细事件保存在本地，RunStore 接收的是精简事件投影；文件收据也不等于输出正文已进入资产库。不要把以下当前 API 说明当成共享存储模式已经实现。
+
 ## 定义 Agent
 
 以下为配置片段：`ReviewInput`、`ReviewReceipt` 和 `reviewReceiptJsonSchema` 由消费项目定义。可直接类型检查的完整例子在文末。

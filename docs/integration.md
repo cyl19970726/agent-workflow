@@ -2,7 +2,9 @@
 
 接入前用 [设计](./designing-workflows.md)、[评估](./evaluating-workflows.md)、[优化](./optimizing-workflows.md)三份指南明确意图、交付和验收。方法建议与库已实现能力分别记录；下面说明现有执行基础设施的边界。
 
-共享库是执行内核和账本合同，不是完整的工作台后端。宿主应用仍拥有唯一任务队列、租约、worker 并发策略、业务资产注册、HTTP 权限和 UI 读模型。
+下文主要说明**原有 core、Codex、SQLite 与 read-model 组合的接入方式**。另有可选的 PostgreSQL Space 服务、Schema Registry、节点合同、runtime bridge、只读控制台及 SIWC Responses 适配，见[Space 存储指南](space-storage.md)。完整共享工作台、一般 Agents SDK 和媒体 harness 尚未交付；目标职责见[架构](architecture.md)。
+
+下文的“宿主”表示装配和运行应用的服务层，负责唯一任务队列、租约、worker 并发、HTTP 权限与读模型接入。它可以由 agent-workflow 的共享服务模块提供，不等于 creation 必须重新实现这些机制。现有接入代码仍有效；新业务目标应优先建设共享模块，再注入业务流程、资产类型、政策和阅读器。
 
 ## 推荐组合
 
@@ -48,7 +50,7 @@ const store = new SQLiteWorkflowRunStore(database);
 
 ## HTTP 与事件读取
 
-共享包没有内置 HTTP、SSE 或 step-retry 路由。宿主可围绕 `RunStore` 提供自己的授权 API，例如运行快照、`listEvents(runId, afterSeq)`、资产索引、取消和允许的修复动作。SSE 与增量轮询都可以基于事件 seq 实现；客户端必须按 seq 去重并支持刷新恢复。
+原有 core／SQLite／read-model 组合没有内置 HTTP、SSE 或 step-retry 路由；可选 Space 层已有只读 HTTP 控制台。宿主可围绕 `RunStore` 提供自己的授权 API，例如运行快照、`listEvents(runId, afterSeq)`、资产索引、取消和允许的修复动作。SSE 与增量轮询都可以基于事件 seq 实现；客户端必须按 seq 去重并支持刷新恢复。
 
 不要把“重试某一步”实现为直接把数据库状态改成通过。当前 core 的恢复单位是 workflow run：重新推进同一个 run，按指纹复用有效节点，对失败/失效路径创建新步骤或 attempt。业务上的定向修复通常应建成显式 repair workflow，并产出新资产版本。
 
@@ -67,7 +69,7 @@ UI 应从同一执行账本和已发布资产生成安全读模型，但不能�
 
 Phase 是用户理解成果的入口，workflow/step/attempt 是执行审计层。已发布中间资产可以在整个父流程结束前阅读；候选可读、结构有效、独立复核通过和当前交付版本必须分别显示。阶段引用资产而不复制内容，也不改变真实生产者。
 
-私有 trace、prompt、工具原始输出、凭据和任意文件路径不进入公共 artifact API。业务正文继续遵守消费项目自己的事实源规则；共享层只保存引用和来源链，不改写报告。
+私有 trace、prompt、工具原始输出、凭据和任意文件路径不进入公共 artifact API。业务正文遵守消费项目自己的事实来源和生产者约定；共享层不得改写报告结论。此处的 read-model 包只投影引用和来源链；可选 Space 服务已持久保存并按节点权限读取正文与版本，不能把原读模型边界误解为资产永远只存本机路径。
 
 ## 与 self-media #71 的关系
 

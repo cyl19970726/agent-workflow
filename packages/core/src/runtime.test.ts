@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ArtifactRef, PhaseContext } from "./contracts.js";
-import type { AgentRunRequest, AgentRunResult, AgentRunner, ChildWorkflowDispatcher, ChildWorkflowDispatchRequest } from "./ports.js";
+import type { AgentRunRequest, AgentRunResult, AgentRunner, ChildWorkflowDispatcher, ChildWorkflowDispatchRequest, StepResultCommit, StepResultReceipt } from "./ports.js";
 import { MemoryRunStore } from "./memory-run-store.js";
-import { artifactPayloadSha256, defineAgent, runWorkflow, workflow, workflowFingerprint, WorkflowCanceledError } from "./runtime.js";
+import { artifactPayloadSha256, AtomicStepReconciliationRequiredError, defineAgent, runWorkflow, workflow, workflowFingerprint, WorkflowCanceledError } from "./runtime.js";
 
 class StubRunner implements AgentRunner {
   calls = 0;
@@ -15,7 +15,121 @@ class StubRunner implements AgentRunner {
 
 const noAgent = new StubRunner(async () => { throw new Error("Unexpected agent call"); });
 
+class AtomicTestStore extends MemoryRunStore {
+  readonly commits: StepResultCommit[] = [];
+  readonly receipts = new Map<string, StepResultReceipt>();
+  failBeforeCommit = false;
+  failReadbackAfterCommitError = false;
+  loseNextResponse = false;
+  async listSteps(runId: string) {
+    if (this.failReadbackAfterCommitError) throw new Error("readback unavailable");
+    return super.listSteps(runId);
+  }
+  async publishArtifact(): Promise<ArtifactRef> { throw new Error("early artifact publication"); }
+  async commitStepResult(commit: StepResultCommit): Promise<StepResultReceipt> {
+    this.commits.push(commit);
+    const prior = this.receipts.get(commit.idempotencyKey);
+    if (prior) return prior;
+    if (this.failBeforeCommit) { this.failReadbackAfterCommitError = true; throw new Error("commit unavailable"); }
+    const artifact = commit.artifact ? await super.publishArtifact(commit.artifact) : undefined;
+    const output = artifact ?? commit.output;
+    await this.updateStep(commit.stepRunId, { state: commit.state, validation: commit.validation, output });
+    await this.updateAttempt(commit.attemptId, { state: commit.state });
+    if (artifact) await this.appendEvent({ runId: artifact.producedBy.workflowRunId, stepRunId: commit.stepRunId,
+      attemptId: commit.attemptId, type: "artifact.published", data: artifact });
+    for (const event of commit.events) await this.appendEvent(event);
+    const receipt = { output, ...(artifact ? { artifact } : {}) };
+    this.receipts.set(commit.idempotencyKey, receipt);
+    if (this.loseNextResponse) { this.loseNextResponse = false; throw new Error("response lost"); }
+    return receipt;
+  }
+}
+
 describe("workflow runtime", () => {
+  it("uses atomic completion for ordinary steps and preserves phase event order", async () => {
+    const store = new AtomicTestStore();
+    const flow = workflow("atomic-phase", { revision: "1" }, (ctx) => ctx.phase("draft",
+      { title: "Draft", purpose: "Write" }, (phase) => phase.task("write", () => "ready", null)));
+    const result = await runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent });
+    expect(result.output).toBe("ready");
+    expect(store.commits.map((commit) => commit.events.map((event) => event.type))).toEqual([
+      ["step.completed"], ["step.completed", "phase.completed"],
+    ]);
+    expect(store.commits.every((commit) => commit.idempotencyKey.includes(commit.stepRunId)
+      && commit.idempotencyKey.includes(commit.attemptId))).toBe(true);
+    const events = (await store.listEvents(result.run.id)).map((event) => event.type);
+    expect(events.indexOf("phase.started")).toBeLessThan(events.indexOf("phase.completed"));
+    expect(events.lastIndexOf("step.completed")).toBeLessThan(events.indexOf("phase.completed"));
+  });
+
+  it("publishes an artifact only as part of its atomic step completion", async () => {
+    const store = new AtomicTestStore();
+    const flow = workflow("atomic-publish", { revision: "1" }, (ctx) => ctx.publish("report", "report", { body: "hello" }, { validation: "valid" }));
+    const result = await runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent });
+    expect(result.output?.id).toBe(store.artifacts[0]?.id);
+    expect(store.commits[0]?.artifact?.sha256).toBe(result.output?.sha256);
+    expect(store.commits[0]?.output).toBeUndefined();
+    expect((await store.listEvents(result.run.id)).map((event) => event.type)).toEqual([
+      "workflow.started", "step.started", "artifact.published", "step.completed", "workflow.completed",
+    ]);
+  });
+
+  it("does not publish an artifact when cancellation arrives before completion", async () => {
+    const store = new AtomicTestStore();
+    const controller = new AbortController();
+    const appendEvent = store.appendEvent.bind(store);
+    store.appendEvent = async (event) => {
+      const recorded = await appendEvent(event);
+      if (event.type === "step.started") controller.abort();
+      return recorded;
+    };
+    const flow = workflow("atomic-cancel", { revision: "1" }, (ctx) => ctx.publish("report", "report", { body: "hello" }));
+    await expect(runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent, signal: controller.signal }))
+      .rejects.toThrow("canceled");
+    expect(store.artifacts).toHaveLength(0);
+    expect(store.commits).toHaveLength(0);
+  });
+
+  it("requires reconciliation before replaying an unresolved atomic attempt", async () => {
+    const store = new AtomicTestStore();
+    let executions = 0;
+    const flow = workflow("atomic-recovery", { revision: "1" }, (ctx) => ctx.task("external", () => {
+      executions++;
+      return "done";
+    }, null));
+    store.failBeforeCommit = true;
+    await expect(runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent })).rejects.toThrow("commit unavailable");
+    expect(store.steps[0]?.state).toBe("running");
+    expect(store.attempts[0]?.state).toBe("running");
+    expect(executions).toBe(1);
+    store.failBeforeCommit = false;
+    store.failReadbackAfterCommitError = false;
+    const resumed = runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent,
+      resumeRunId: store.runs[0]!.id });
+    await expect(resumed).rejects.toMatchObject({ name: "AtomicStepReconciliationRequiredError",
+      runId: store.runs[0]!.id, stepRunId: store.steps[0]!.id, attemptId: store.attempts[0]!.id });
+    await expect(resumed).rejects.toBeInstanceOf(AtomicStepReconciliationRequiredError);
+    expect(executions).toBe(1);
+    expect(store.steps[0]?.state).toBe("running");
+    expect(store.attempts[0]?.state).toBe("running");
+  });
+
+  it("reuses a persisted atomic result after its commit response is lost", async () => {
+    const store = new AtomicTestStore();
+    let executions = 0;
+    const flow = workflow("atomic-lost-response", { revision: "1" }, (ctx) => ctx.task("external", () => {
+      executions++;
+      return "done";
+    }, null));
+    store.loseNextResponse = true;
+    const result = await runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent });
+    expect(result.run.state).toBe("succeeded");
+    const resumed = await runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent,
+      resumeRunId: result.run.id });
+    expect(resumed.output).toBe("done");
+    expect(executions).toBe(1);
+    expect(store.commits).toHaveLength(1);
+  });
   it("runs fresh, replays exact validated nodes, and invalidates changed input", async () => {
     const store = new MemoryRunStore();
     const action = vi.fn((value: number) => value * 2);

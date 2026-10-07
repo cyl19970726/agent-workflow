@@ -1,0 +1,81 @@
+--- a/renderers/shared/geometry.mjs
++++ b/renderers/shared/geometry.mjs
+@@ -1762,6 +1762,7 @@
+ }
+ 
+ export const componentFill = {
++  'agent-sdk': 'c-agent-sdk', codex: 'c-codex', program: 'c-program', human: 'c-human', decision: 'c-decision', group: 'c-group', 'unknown-agent': 'c-unknown-agent',
+   frontend: 'c-frontend',
+   backend: 'c-backend',
+   database: 'c-database',
+@@ -1772,6 +1773,7 @@
+ };
+ 
+ export const componentText = {
++  'agent-sdk': 't-agent-sdk', codex: 't-codex', program: 't-program', human: 't-human', decision: 't-decision', group: 't-group', 'unknown-agent': 't-unknown-agent',
+   frontend: 't-frontend',
+   backend: 't-backend',
+   database: 't-database',
+--- a/renderers/shared/utils.mjs
++++ b/renderers/shared/utils.mjs
+@@ -30,6 +30,7 @@
+ }
+ 
+ const SIGIL_TONE = {
++  'agent-sdk': 'frontend', codex: 'backend', program: 'external', human: 'frontend', decision: 'database', group: 'external', 'unknown-agent': 'external',
+   frontend: 'frontend',
+   start: 'frontend',
+   backend: 'backend',
+@@ -47,6 +48,7 @@
+ };
+ 
+ const SIGIL_SHAPE = {
++  decision: `<path d="M8 1.5 14.5 8 8 14.5 1.5 8Z"/><path d="M8 5v3M8 11h.01"/>`,
+   calendar: `<rect x="2" y="3.5" width="12" height="10.5" rx="2"/><path d="M5 2v3M11 2v3M2 7h12M5 10h2M9 10h2"/>`,
+   clock: `<circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/>`,
+   person: `<circle cx="8" cy="4.5" r="2.5"/><path d="M3 14v-2a5 5 0 0 1 10 0v2"/>`,
+@@ -96,7 +98,8 @@
+ 
+ export function renderSemanticSigil(kind, { x, y, size = SEMANTIC_SIGIL_SIZE, icon } = {}) {
+   if (icon === 'none') return '';
+-  const selected = icon ?? kind;
++  const workflowIcons = {'agent-sdk':'active',codex:'backend',program:'backend',human:'person',decision:'decision',group:'neutral','unknown-agent':'neutral'};
++  const selected = icon ?? workflowIcons[kind] ?? kind;
+   const normalized = Object.hasOwn(SIGIL_SHAPE, selected) ? selected : 'neutral';
+   const tone = SIGIL_TONE[kind] || 'external';
+   const scale = size / 16;
+--- a/renderers/shared/validator.mjs
++++ b/renderers/shared/validator.mjs
+@@ -40,7 +40,14 @@
+   if (!validate) {
+     throw new Error(`validateSchema: unknown diagram type "${diagramType}"`);
+   }
+-  if (!validate(data)) {
++  // Workflow Space adds executor categories while retaining the upstream IR.
++  // The pinned generated validator knows only infrastructure types; validate
++  // every other field against it using a validation-only projection.
++  const workflowTypes = new Set(['agent-sdk', 'codex', 'program', 'human', 'decision', 'group', 'unknown-agent']);
++  const validationData = diagramType === 'workflow' && Array.isArray(data?.nodes)
++    ? {...data, nodes: data.nodes.map(node => workflowTypes.has(node?.type) ? {...node, type: 'external'} : node)}
++    : data;
++  if (!validate(validationData)) {
+     const diagnostics = validate.errors.map((error) => {
+       const annotated = annotatedPath(error.instancePath, data);
+       const subject = {
+--- a/renderers/workflow/workflow-compiler.mjs
++++ b/renderers/workflow/workflow-compiler.mjs
+@@ -960,11 +960,11 @@
+ 
+   // Font sizes for this renderer's node text; the fitting geometry is shared.
+   const nodeTextFit = {
+-    labelPreferred: 11,
++    labelPreferred: 17,
+     labelMinimum: 9,
+-    sublabelPreferred: 8,
++    sublabelPreferred: 11,
+     sublabelMinimum: 6,
+-    tagPreferred: 7,
++    tagPreferred: 10,
+     tagMinimum: 6,
+   };
+ 

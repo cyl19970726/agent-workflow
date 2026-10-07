@@ -1,0 +1,132 @@
+{
+  "repository": "https://github.com/tt-a1i/archify",
+  "version": "3.0.1",
+  "commit": "73aaa0696e8f72c232ea710e6fa94fd953f3e773",
+  "files": [
+    {
+      "path": "LICENSE",
+      "upstreamSha256": "b799ab081703e7821ae5096d2c1abdf14bbdc75e8ea1c4045998c36ed6db9706",
+      "modified": false
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "upstreamSha256": "0b7fb59365dc21c93b0f62526d74ee913aeec9ae532c112bc76afa7edcd56e14",
+      "modified": false
+    },
+    {
+      "path": "assets/JetBrainsMono-OFL.txt",
+      "upstreamSha256": "c1ab7c666206842a02b35b30770dac0d7a10156ed401c9defc3f02a754d89e90",
+      "modified": false
+    },
+    {
+      "path": "assets/template.html",
+      "upstreamSha256": "b0b550d644b77cad401bbc4b21375919ef01db45d235122a0ee42b732cb34233",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/atomic-output.mjs",
+      "upstreamSha256": "f804d66d1801ac2dadc9d0a4c334645cfbb7a8cd1a7de112ddfb952c056a580b",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/brand-marks.mjs",
+      "upstreamSha256": "5cfc3c517ca6fe7e867c208101059dd7747ca3de3c9934b17583d6cf20336620",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/cli.mjs",
+      "upstreamSha256": "097f968a614008b07972f56de995e5b933c61ee0ba0d16d967c0a97c6d92e9d7",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/diagnostics.mjs",
+      "upstreamSha256": "d052a0e72eec2a2bf29c70dacdd3350100e2c76fc2627d14f79234077c571e3f",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/engineering-profiles.mjs",
+      "upstreamSha256": "7e99f9d5423f66cc9ab6224da56dc2d5aa6c6faec29178034794e9db6b5b2889",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/generated-brand-marks.mjs",
+      "upstreamSha256": "0f157d229c12df6f53763a3b88684baa5803a52484c49c4d34ec40b8743beea2",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/generated-validators.mjs",
+      "upstreamSha256": "33697207b90a0eb0d0566a1c46eaf3cb58f85cef0f43caeec991017ade34c2b9",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/geometry.mjs",
+      "upstreamSha256": "b25d849e6e256b1eef37fa3bb88712d0617d6eb646a2355a934505fcaa9be75d",
+      "modified": true
+    },
+    {
+      "path": "renderers/shared/i18n.mjs",
+      "upstreamSha256": "03f5356110a08b2cf684a484af5502bb392482de1ef61123707c6da2724c5201",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/legend.mjs",
+      "upstreamSha256": "1cc5033a188690fc5f5fef1bd7915a275e6c790bb3061c63c00a97b234625cbe",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/output-path.mjs",
+      "upstreamSha256": "7422139101abd93493918898a97bed06f2212bfd411d3514cd229b6d57a3797e",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/path-semantics.mjs",
+      "upstreamSha256": "4ef002af9061c06634a07de6d199fd7d13e6c50561c792fd018118bf3e065f52",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/portable-path.mjs",
+      "upstreamSha256": "26130cbcdae9b9f082486aeb5feec9c5fe57905d2ed8e30c8081b9710e2e8ac3",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/repository-evidence.mjs",
+      "upstreamSha256": "19c652af2afec5604e9ce23d356f3cc2c5d6146592531036da20e79f4db3ed1d",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/repository-location.mjs",
+      "upstreamSha256": "9ee8294c39d1be40f5aca3334fdfc7527ef9b224d6c1e69ca57aefc6a8c77856",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/spatial-grid.mjs",
+      "upstreamSha256": "e728bf6a729972f95ae09e368ea370490d10ff94d49debe2fab2e9bac923ee1a",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/text-fit.mjs",
+      "upstreamSha256": "ebd499072ef4fe31c9aabf45a01c204a9c2c142d45f087c3240673f90f477038",
+      "modified": false
+    },
+    {
+      "path": "renderers/shared/utils.mjs",
+      "upstreamSha256": "422b66c6945de473b1f96e4f3641339b6a24c8ccef60795a38ca2386e10bc26b",
+      "modified": true
+    },
+    {
+      "path": "renderers/shared/validator.mjs",
+      "upstreamSha256": "7460d7fcbcdf710649256c5e96142ae26d807a655d3296ee8caf7f5e158622cc",
+      "modified": true
+    },
+    {
+      "path": "renderers/workflow/workflow-compiler.mjs",
+      "upstreamSha256": "25646b0a7ee13d62ed7b21c915d40665608ffd57c69af263a8ec4250ceb9214e",
+      "modified": true
+    },
+    {
+      "path": "renderers/workflow/workflow-migration-geometry.mjs",
+      "upstreamSha256": "ebfc5085dd008ae63802f500402fb7bf8ca0ae28460997d867f45e5493b8fbe6",
+      "modified": false
+    }
+  ]
+}

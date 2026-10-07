@@ -67,6 +67,30 @@ export interface ArtifactDraft {
   review: ArtifactRef["review"];
 }
 
+/** One durable step completion. Stores implementing this must commit the result,
+ * attempt state, and events together, and return the prior receipt on a retry
+ * with the same idempotency key. When artifact is supplied, publish it in that
+ * transaction and prepend artifact.published to the supplied events. */
+export interface StepResultCommit {
+  stepRunId: string;
+  attemptId: string;
+  idempotencyKey: string;
+  state: RunState;
+  validation: ValidationState;
+  output?: unknown;
+  artifact?: ArtifactDraft;
+  events: EventDraft[];
+}
+
+export interface StepResultReceipt {
+  output: unknown;
+  artifact?: ArtifactRef;
+}
+
+export interface ArtifactPayloadReader {
+  getArtifactPayload(id: string): Promise<unknown>;
+}
+
 export interface RunStore {
   createRun(record: Omit<RunRecord, "id">): Promise<RunRecord>;
   getRun(id: string): Promise<RunRecord | undefined>;
@@ -85,6 +109,7 @@ export interface RunStore {
   publishArtifact(artifact: ArtifactDraft): Promise<ArtifactRef>;
   getArtifact(id: string): Promise<ArtifactRef | undefined>;
   listArtifacts(runId: string): Promise<ArtifactRef[]>;
+  commitStepResult?(commit: StepResultCommit): Promise<StepResultReceipt>;
 }
 
 export interface AgentRunRequest<Input> {
