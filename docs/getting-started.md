@@ -1,6 +1,6 @@
 # 快速开始
 
-`agent-workflow` 是一个薄的 TypeScript 工作流运行层。业务流程仍是普通 TypeScript；这个库负责给步骤稳定身份、记录运行/尝试/事件、复用已验证结果，并通过端口接入 Agent 与持久子流程。它不会替宿主应用建立任务队列、HTTP 服务或研究质量规则。
+本文从 TypeScript 执行核心开始：给步骤稳定身份、记录运行/尝试/事件、复用已验证结果，并通过端口接入 Agent 与持久子流程。共享包另有可选的 PostgreSQL Space 资产与节点合同层、只读控制台和 SIWC Responses 适配；完整任务队列、一般 Agents SDK、媒体存储与生产工作台仍在建设中。见[Space 存储指南](space-storage.md)、[产品](product.md)和[架构](architecture.md)。业务项目继续定义自己的业务方法与质量标准。
 
 ## 环境与包
 
@@ -13,11 +13,16 @@ npm run examples
 npm run check:examples
 ```
 
-三个包的职责如下：
+当前八个包的职责如下：
 
 - `@signal-room/workflow`：合同、运行时和内存存储；不依赖 Codex、SQLite 或业务仓库。
 - `@signal-room/workflow-codex`：Codex TypeScript SDK 的 `AgentRunner` 适配器与低层调用入口。
 - `@signal-room/workflow-sqlite`：执行账本的 SQLite `RunStore`；不负责队列、租约和 worker 调度。
+- `@signal-room/workflow-read-model`：执行账本到浏览器的安全读模型，接入见[前端指南](frontend-integration.md)。
+- `@signal-room/workflow-postgres`：PostgreSQL 执行账本原语，见[PG 存储指南](postgres-storage.md)。
+- `@signal-room/workflow-space-contracts`：JSON Schema Registry 与冻结的 workflow storageContract。
+- `@signal-room/workflow-spaces`：可选 PostgreSQL Space 领域服务、节点客户端、core runtime bridge 与只读控制台，见[Space 存储指南](space-storage.md)。
+- `@signal-room/workflow-agent-sdk`：SIWC Responses 接入；尚非通用 Agents SDK runner。
 
 仓库里的 [`examples/document-check.mjs`](../examples/document-check.mjs) 是最小可运行示例：它只使用内存存储和确定性任务，不需要 Codex 账号。
 
@@ -95,7 +100,7 @@ const resumed = await runWorkflow({
 git submodule add https://github.com/cyl19970726/agent-workflow.git vendor/agent-workflow
 ```
 
-将以下字段合并进消费项目的 package.json，保留已有 workspace、脚本及依赖。这里是使用全部三个包的最小配置；只用 core 的项目可省去其他两个包及其构建步骤。
+将以下字段合并进消费项目的 package.json，保留已有 workspace、脚本及依赖。这里使用 core、Codex 和 SQLite 三个包；如需浏览器读模型，再添加对应包。只用 core 的项目可省去其他两个包及其构建步骤。
 
 ```json
 {

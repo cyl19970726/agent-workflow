@@ -1,5 +1,7 @@
 # 前端工作台接入读模型
 
+本文是现有 `workflow-read-model` API 的用法，不是完整通用工作台已经交付的声明。目标中的流程、资产、评价、比较与历史页面由共享项目提供；业务注册专用阅读器与政策。下文“宿主”可由共享服务模块承担，不能据此要求每个业务重造后端与 UI。范围见[产品](product.md)，模块边界见[架构](architecture.md)。
+
 `@signal-room/workflow-read-model` 是执行账本到浏览器的服务端投影。它把一个指定 run 及其真实子孙组织成运行、阶段、逻辑调用、attempt 和资产关系；浏览器只导入 `@signal-room/workflow-read-model/contracts` 的类型，不访问 `RunStore`。可运行的无模型示例：
 
 ```bash
@@ -81,3 +83,6 @@ cursor 是服务进程内的随机 opaque token，默认最多保存 64 个，�
 ## 兼容与职责
 
 读模型不改变账本和旧 workflow revision。历史 run 仍可打开，缺失 retry、review 或 selected 关系时明确显示未知。新增语义事件或领域关系需由写流程在新的 workflow revision 中记录，并保留旧定义以供恢复。宿主继续负责队列、租约、取消传播、业务报告 reader、内容质量判断和候选晋升；共享投影不解释业务 schema，也不会改写报告正文。
+
+
+完整方法图、节点详情和运行状态的共享交互查看器见 [Archify 工作流查看器](archify-viewer.md)。

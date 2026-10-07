@@ -3,10 +3,18 @@ import type {
   ParallelResults, ParallelSettledResults, PhaseArtifactBinding, PhaseContext, PhaseDefinition, StepKind, TaskImplementation,
   ValidationResult, ValidationState, WorkflowContext, WorkflowDefinition, WorkflowTerminal,
 } from "./contracts.js";
-import type { AgentRunner, ChildWorkflowDispatcher, RunRecord, RunStore, StepRecord } from "./ports.js";
+import type { AgentRunner, ArtifactDraft, ChildWorkflowDispatcher, EventDraft, RunRecord, RunStore, StepRecord, StepResultReceipt } from "./ports.js";
 
 export class WorkflowCanceledError extends Error {
   constructor() { super("Workflow execution was canceled"); this.name = "WorkflowCanceledError"; }
+}
+
+/** An atomic store has an unfinished step whose commit outcome must be resolved before replay. */
+export class AtomicStepReconciliationRequiredError extends Error {
+  constructor(readonly runId: string, readonly stepRunId: string, readonly attemptId: string) {
+    super(`Atomic step reconciliation required for run ${runId}, step ${stepRunId}, attempt ${attemptId}`);
+    this.name = "AtomicStepReconciliationRequiredError";
+  }
 }
 
 export interface RunWorkflowOptions<Input, Output> {
@@ -27,6 +35,12 @@ export interface RunWorkflowResult<Output> {
 }
 
 type RuntimeSharedState = { pending: Promise<void>[]; producerSteps: WeakMap<object, string[]>; executedKeys: Set<string> };
+const pendingArtifactBrand: unique symbol = Symbol("pendingArtifact");
+type PendingArtifact = { readonly [pendingArtifactBrand]: true; readonly draft: ArtifactDraft };
+function pendingArtifact(draft: ArtifactDraft): PendingArtifact { return { [pendingArtifactBrand]: true, draft }; }
+function isPendingArtifact(value: unknown): value is PendingArtifact {
+  return !!value && typeof value === "object" && pendingArtifactBrand in value;
+}
 
 /**
  * Step kinds whose second use of a key in one execution would be answered from the first step's record
@@ -301,10 +315,14 @@ class RuntimeContext implements WorkflowContext {
   async publish(key: string, artifactType: string, payload: unknown, provenance: { schemaVersion?: string; revision?: string; dependsOn?: ArtifactDependency[]; validation?: ValidationState; review?: ArtifactRef["review"] } = {}): Promise<ArtifactRef> {
     return this.step(key, "publish", { artifactType, payload, provenance }, "publish:v1", provenance.validation ?? "pending", async (execution, emit) => {
       const digest = await artifactPayloadSha256(payload);
-      const artifact = await this.store.publishArtifact({ type: artifactType, schemaVersion: provenance.schemaVersion ?? "v1",
+      const draft: ArtifactDraft = { type: artifactType, schemaVersion: provenance.schemaVersion ?? "v1",
         revision: provenance.revision ?? digest, sha256: digest, uri: `workflow-artifact://${this.run.id}/${execution.stepRunId}/${digest}`,
         payload, producedBy: { workflowRunId: this.run.id, stepRunId: execution.stepRunId, attemptId: execution.attemptId },
-        dependsOn: provenance.dependsOn ?? [], validation: provenance.validation ?? "pending", review: provenance.review ?? "pending" });
+        dependsOn: provenance.dependsOn ?? [], validation: provenance.validation ?? "pending", review: provenance.review ?? "pending" };
+      if (this.store.commitStepResult) {
+        return { value: pendingArtifact(draft) as unknown as ArtifactRef, validation: draft.validation };
+      }
+      const artifact = await this.store.publishArtifact(draft);
       await emit("artifact.published", artifact);
       return { value: artifact, validation: artifact.validation };
     });
@@ -345,6 +363,8 @@ class RuntimeContext implements WorkflowContext {
     const emit = async (type: string, data?: unknown) => { await this.store.appendEvent({ runId: this.run.id, stepRunId: step.id, attemptId: attempt.id, type, data }); };
     await emit("step.started");
     if (kind === "phase") await emit("phase.started", { phaseId: step.phaseId, phasePath: step.phasePath, definition: step.phaseDefinition });
+    let atomicCommitAttempted = false;
+    let expectedCommit: { state: StepRecord["state"]; validation: ValidationState } | undefined;
     try {
       this.assertActive();
       const raw = await execute({ signal: this.signal, idempotencyKey: `${this.run.id}:${stepKey}`, runId: this.run.id, stepRunId: step.id, attemptId: attempt.id }, emit);
@@ -352,6 +372,26 @@ class RuntimeContext implements WorkflowContext {
       const wrapped = isStepOutput<Output>(raw) ? raw : { value: raw, validation: defaultValidation };
       const phaseTerminal = kind === "phase" ? terminalStateOf(wrapped.value) : undefined;
       const state = phaseTerminal ?? (wrapped.validation === "invalid" && !reuseInvalidOutput ? "needs_review" : "succeeded");
+      if (this.store.commitStepResult) {
+        const completionEvents: EventDraft[] = [{ runId: this.run.id, stepRunId: step.id, attemptId: attempt.id,
+          type: "step.completed", data: { validation: wrapped.validation } }];
+        if (kind === "phase") completionEvents.push({ runId: this.run.id, stepRunId: step.id, attemptId: attempt.id,
+          type: `phase.${state === "succeeded" ? "completed" : state}`,
+          data: { phaseId: step.phaseId, phasePath: step.phasePath, state } });
+        const pending = isPendingArtifact(wrapped.value) ? wrapped.value : undefined;
+        this.assertActive();
+        expectedCommit = { state, validation: wrapped.validation };
+        atomicCommitAttempted = true;
+        const receipt = await this.store.commitStepResult({ stepRunId: step.id, attemptId: attempt.id,
+          idempotencyKey: `${this.run.id}:${step.id}:${attempt.id}:completion`, state, validation: wrapped.validation,
+          ...(pending ? { artifact: pending.draft } : { output: wrapped.value }), events: completionEvents });
+        const output = pending ? receipt.artifact ?? receipt.output : receipt.output;
+        if (pending && (!output || typeof output !== "object" || !("id" in output))) {
+          throw new Error("Atomic artifact commit did not return an artifact reference");
+        }
+        if (kind === "agent") this.rememberProducer(output, step.id);
+        return output as Output;
+      }
       await this.store.updateStep(step.id, { state, validation: wrapped.validation, output: wrapped.value });
       await this.store.updateAttempt(attempt.id, { state });
       await emit("step.completed", { validation: wrapped.validation });
@@ -360,6 +400,18 @@ class RuntimeContext implements WorkflowContext {
       if (kind === "agent") this.rememberProducer(wrapped.value, step.id);
       return wrapped.value;
     } catch (error) {
+      // A harness may lose the durable acknowledgement after observing a model result.
+      // Preserve the live attempt so resume must reconcile before invoking it again.
+      if (error instanceof AtomicStepReconciliationRequiredError) throw error;
+      if (atomicCommitAttempted) {
+        const committed = await this.reconcileCommittedStep(step.id, attempt.id, expectedCommit!);
+        if (committed) {
+          if (kind === "agent") this.rememberProducer(committed.output, step.id);
+          return committed.output as Output;
+        }
+        // The commit outcome is uncertain. Do not turn a possibly committed result into a failed step.
+        throw error;
+      }
       if (error instanceof WorkflowSuspendedError) {
         await this.store.updateStep(step.id, { state: "waiting" });
         await this.store.updateAttempt(attempt.id, { state: "waiting" });
@@ -378,10 +430,27 @@ class RuntimeContext implements WorkflowContext {
       throw error;
     }
   }
+  private async reconcileCommittedStep(stepRunId: string, attemptId: string,
+    expected: { state: StepRecord["state"]; validation: ValidationState }): Promise<StepResultReceipt | undefined> {
+    try {
+      const step = (await this.store.listSteps(this.run.id)).find((item) => item.id === stepRunId);
+      const attempt = (await this.store.listAttempts(stepRunId)).find((item) => item.id === attemptId);
+      if (!step || !attempt || step.state !== expected.state || step.validation !== expected.validation
+        || attempt.state !== expected.state) return undefined;
+      return { output: step.output };
+    } catch {
+      return undefined;
+    }
+  }
   private async closeStaleAttempts(key: string): Promise<void> {
     const steps = await this.store.listSteps(this.run.id);
     for (const step of steps.filter((item) => item.key === key && item.state === "running")) {
-      for (const attempt of await this.store.listAttempts(step.id)) {
+      const attempts = await this.store.listAttempts(step.id);
+      if (this.store.commitStepResult) {
+        const unresolved = attempts.find((attempt) => attempt.state === "running") ?? attempts.at(-1);
+        throw new AtomicStepReconciliationRequiredError(this.run.id, step.id, unresolved?.id ?? "<missing>");
+      }
+      for (const attempt of attempts) {
         if (attempt.state === "running") await this.store.updateAttempt(attempt.id, { state: "failed", error: "Interrupted before resume" });
       }
       await this.store.updateStep(step.id, { state: "failed", error: "Interrupted before resume" });

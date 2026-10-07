@@ -1,0 +1,14 @@
+{
+  "name": "@signal-room/workflow-space-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./contracts": {"types": "./dist/contracts.d.ts", "import": "./dist/contracts.js"},
+    "./server": {"types": "./dist/server.d.ts", "import": "./dist/server.js"}
+  },
+  "files": ["dist"],
+  "engines": {"node": ">=24"},
+  "scripts": {"build": "tsc -p tsconfig.json"},
+  "dependencies": {"@signal-room/workflow-spaces": "0.1.0", "zod": "^4.1.0"}
+}
