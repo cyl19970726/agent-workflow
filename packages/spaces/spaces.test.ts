@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
-import { AtomicStepReconciliationRequiredError, defineAgent, runWorkflow, type AgentRunner } from '@signal-room/workflow';
+import { AtomicStepReconciliationRequiredError, artifactPayloadSha256, defineAgent, runWorkflow, type AgentRunner } from '@signal-room/workflow';
 import { createSpaceRuntime } from './runtime.js';
 import { InvalidObservedOutputError } from './errors.js';
 import { JSON_SCHEMA_DIALECT, type SchemaRef, type StorageContractDraft } from '@signal-room/workflow-space-contracts';
@@ -36,6 +37,37 @@ const commit=(key='result',text='First report')=>({idempotencyKey:key,outputs:[{
 suite('Workflow Spaces: real PostgreSQL domain and capability contracts',()=>{
  beforeAll(async()=>{pool=new Pool({connectionString:url!,max:12});await Promise.all([migrateWorkflowSpaces(pool),migrateWorkflowSpaces(pool)]);blobs=new PostgresBlobStore(pool);await blobs.migrate();});
  afterAll(async()=>{await pool?.end();});
+ it('freezes the exact same manifest when an equal insert is still committing',async()=>{
+   const f=await fixture(),caseId=`concurrent-${randomUUID()}`;
+   await f.service.createCase(f.space.id,{id:caseId,title:'Concurrent manifest',objective:'Bind one exact input',constraints:[]});
+   const assets={source:f.source.id},id=await artifactPayloadSha256({caseId,assets});
+   const value={id,spaceId:f.space.id,caseId,assets,hash:id};
+   const holder=await pool.connect();
+   try {
+     await holder.query('BEGIN');
+     const backend=await holder.query<{pid:number}>('SELECT pg_backend_pid() AS pid');
+     await holder.query('INSERT INTO ws_manifests(space_id,id,case_id,document) VALUES($1,$2,$3,$4::jsonb)',
+       [f.space.id,id,caseId,JSON.stringify(value)]);
+     const pending=f.service.freezeInputs(f.space.id,caseId,assets).then(manifest=>({manifest,error:null}),error=>({manifest:null,error}));
+     let blocked=false;
+     for(let attempt=0;attempt<200;attempt++){
+       const waiting=await holder.query<{blocked:boolean}>(
+         'SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS blocked',
+         [backend.rows[0]!.pid]);
+       if(waiting.rows[0]?.blocked){blocked=true;break;}
+       await new Promise(resolve=>setTimeout(resolve,10));
+     }
+     expect(blocked).toBe(true);
+     await holder.query('COMMIT');
+     const result=await pending;
+     expect(result.error).toBeNull();
+     expect(result.manifest).toEqual(value);
+     const rows=await pool.query<{document:typeof value}>('SELECT document FROM ws_manifests WHERE space_id=$1 AND id=$2',[f.space.id,id]);
+     expect(rows.rows.map(row=>row.document)).toEqual([value]);
+     const slots=await pool.query<{slot:string;version_id:string}>('SELECT slot,version_id FROM ws_manifest_assets WHERE space_id=$1 AND manifest_id=$2',[f.space.id,id]);
+     expect(slots.rows).toEqual([{slot:'source',version_id:f.source.id}]);
+   } finally {await holder.query('ROLLBACK');holder.release();}
+ });
  it('persists pre-run imports, definitions and unrelated schemas; rejects identity overwrite and invalid payload',async()=>{
    const f=await fixture();expect(f.source.source.kind).toBe('import');
    await expect(f.service.importAsset(f.space.id,{schema:f.ref,payload:{public:42},description:'bad',idempotencyKey:'bad'})).rejects.toThrow();

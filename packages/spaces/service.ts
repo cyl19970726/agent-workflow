@@ -305,7 +305,8 @@ export class WorkflowSpaceService {
       for (const id of Object.values(assets)) await this.asset(db,spaceId,id);
       const digest=await hash({caseId,assets});
       const value = {id:digest,spaceId,caseId,assets:clone(assets),hash:digest};
-      await db.query('INSERT INTO ws_manifests(space_id,id,case_id,document) VALUES($1,$2,$3,$4::jsonb) ON CONFLICT(space_id,id) DO NOTHING',[spaceId,value.id,caseId,json(value)]);
+      // Both unique keys identify this same content-addressed manifest; either may arbitrate a concurrent insert.
+      await db.query('INSERT INTO ws_manifests(space_id,id,case_id,document) VALUES($1,$2,$3,$4::jsonb) ON CONFLICT DO NOTHING',[spaceId,value.id,caseId,json(value)]);
       for (const [slot,id] of Object.entries(assets)) await db.query('INSERT INTO ws_manifest_assets(space_id,manifest_id,slot,version_id) VALUES($1,$2,$3,$4) ON CONFLICT(space_id,manifest_id,slot) DO NOTHING',[spaceId,value.id,slot,id]);
       return value;
     });
