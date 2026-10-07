@@ -8,6 +8,11 @@ export async function migrateWorkflowSpaces(pool: Pool): Promise<void> {
   try {
     await db.query('BEGIN');
     await db.query('SELECT pg_advisory_xact_lock(4832941, 2)');
+    const applied=await db.query<{version:number}>(
+      'SELECT version FROM aw_schema_migrations WHERE component=$1',['workflow-spaces']);
+    // Bump this version and add the upgrade DDL whenever the Space schema changes.
+    if(applied.rows[0]?.version===1){await db.query('COMMIT');return;}
+    if(applied.rows[0])throw new Error('Unsupported workflow spaces schema version');
     await db.query(`
       CREATE TABLE IF NOT EXISTS ws_spaces (
         id text PRIMARY KEY, document jsonb NOT NULL
@@ -292,6 +297,7 @@ export async function migrateWorkflowSpaces(pool: Pool): Promise<void> {
       CREATE INDEX IF NOT EXISTS ws_versions_run_idx ON ws_asset_versions(space_id,run_id);
       CREATE INDEX IF NOT EXISTS ws_sessions_events_idx ON ws_session_events(space_id,session_id,seq);
     `);
+    await db.query('INSERT INTO aw_schema_migrations(component,version) VALUES($1,$2)',['workflow-spaces',1]);
     await db.query('COMMIT');
   } catch (error) { await db.query('ROLLBACK'); throw error; }
   finally { db.release(); }

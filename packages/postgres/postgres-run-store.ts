@@ -17,6 +17,17 @@ export async function migratePostgresWorkflowStore(pool: Pool): Promise<void> {
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(4832941, 1)");
+    await client.query(`CREATE TABLE IF NOT EXISTS aw_schema_migrations (
+      component text PRIMARY KEY, version integer NOT NULL CHECK (version > 0)
+    )`);
+    const applied = await client.query<{ version: number }>(
+      "SELECT version FROM aw_schema_migrations WHERE component = $1", ["workflow-run-store"]);
+    // Bump this version and add the upgrade DDL whenever the ledger schema changes.
+    if (applied.rows[0]?.version === 1) {
+      await client.query("COMMIT");
+      return;
+    }
+    if (applied.rows[0]) throw new Error("Unsupported workflow run store schema version");
     await client.query(`
       CREATE TABLE IF NOT EXISTS aw_runs (
         workspace_id text NOT NULL, id text NOT NULL, parent_run_id text,
@@ -83,6 +94,7 @@ export async function migratePostgresWorkflowStore(pool: Pool): Promise<void> {
           REFERENCES aw_attempts(workspace_id, run_id, step_run_id, id)
       );
     `);
+    await client.query("INSERT INTO aw_schema_migrations(component, version) VALUES ($1, $2)", ["workflow-run-store", 1]);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

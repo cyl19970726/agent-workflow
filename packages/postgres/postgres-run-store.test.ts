@@ -63,6 +63,23 @@ suite("PostgreSQL workflow ledger", () => {
     expect((await store.appendEvent({ runId: run.id, type: "next" })).seq).toBe(41);
   });
 
+  it("does not repeat migration DDL while a run event write holds its table lock", async () => {
+    const workspaceId = workspace();
+    const store = makeStore(workspaceId);
+    const { run } = await producer(store);
+    const writer = await pool.connect();
+    const migrator = new Pool({ connectionString: url!, options: "-c lock_timeout=750ms" });
+    try {
+      await writer.query("BEGIN");
+      await writer.query("UPDATE aw_runs SET document=document WHERE workspace_id=$1 AND id=$2", [workspaceId, run.id]);
+      await migratePostgresWorkflowStore(migrator);
+    } finally {
+      await writer.query("ROLLBACK");
+      writer.release();
+      await migrator.end();
+    }
+  });
+
   it("returns every event after a cursor beyond the former 1000-event cap", async () => {
     const store = makeStore();
     const { run } = await producer(store);

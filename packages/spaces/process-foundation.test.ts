@@ -53,6 +53,19 @@ suite('Process and relation atomic PostgreSQL foundation',()=>{
   const commit={idempotencyKey:'publish',outputs:[{slot:'draft',payload:{text:'draft',notes:['own-note']},dependencySlots:['source']}],relations:[{typeId:'cites',from:{outputSlot:'draft',pointer:'/text'},to:{inputSlot:'materials',pointer:'/notes/0'}},{typeId:'cites',from:{outputSlot:'draft',pointer:'/text'},to:{outputSlot:'draft',pointer:'/notes/0'}}]};
   return {service,space,version,source,materials,run,context,commit,manifest,r};
  }
+ it('does not repeat Space migration DDL while a workflow write holds its table lock',async()=>{
+  const f=await fixture();
+  const writer=await pool.connect(),migrator=new Pool({connectionString:url!,options:'-c lock_timeout=750ms'});
+  try {
+   await writer.query('BEGIN');
+   await writer.query('UPDATE ws_workflows SET document=document WHERE space_id=$1 AND id=$2',[f.space.id,f.version.id]);
+   await migrateWorkflowSpaces(migrator);
+  } finally {
+   await writer.query('ROLLBACK');
+   writer.release();
+   await migrator.end();
+  }
+ });
  it('freezes new process hashes and keeps retrospective old runs unchanged',async()=>{
   const old=await fixture(false),modern=await fixture();expect(old.run.process).toBeUndefined();expect(modern.run.process?.hash).toBe(modern.version.entrypoints.write?.process?.hash);expect(await old.service.runtimeProcessContract(old.space.id,old.run.runId)).toBeUndefined();
   const service=new WorkflowSpaceService(pool,blobs,{id:'process-owner',kind:'human'},{processResolvers:{flow:()=>({resolverVersion:'retro-1',contract:processDraft(old.r),mappings:[{stepRunId:old.context.stepRunId,annotation:{nodeId:'write',round:1},evidence:'Exact fixture node'}]})}});
