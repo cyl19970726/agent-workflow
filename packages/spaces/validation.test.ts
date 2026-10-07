@@ -214,7 +214,10 @@ suite('frozen validation evidence',()=>{
     const badHash=await make('bad-hash','Judge independent report',[],true);
     expect((await f.service.linkValidationReview(f.space.id,plan.id,{entryId:entry.id,runId:run.runId,reviewId:badHash.id})).judgeEvidence.verified).toBe(false);
     const summary=await f.service.validationSummary(f.space.id,plan.id);
-    expect(summary.entries[0]!.requiredJudgeCoverage[1]).toMatchObject({reviewIds:[],unverifiedReviewIds:[legacy.id,badHash.id]});
+    const coverage=summary.entries[0]!.requiredJudgeCoverage[1]!;
+    expect(coverage.reviewIds).toEqual([]);
+    // Coverage identifies the exact evidence set; it does not promise insertion order.
+    expect([...coverage.unverifiedReviewIds].sort()).toEqual([legacy.id,badHash.id].sort());
     expect(summary.entries[0]!.attempts[0]!.judgeEvidence.every(item=>!item.verified)).toBe(true);
   });
 
