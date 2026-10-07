@@ -13,7 +13,23 @@ export const bytesHash = (bytes: Uint8Array): string => createHash('sha256').upd
 export class PostgresBlobStore implements BlobStore {
   constructor(private readonly pool: Pool, readonly maxBytes = 16 * 1024 * 1024) {}
   async migrate(): Promise<void> {
-    await this.pool.query('CREATE TABLE IF NOT EXISTS ws_blob_bytes (key text PRIMARY KEY, bytes bytea NOT NULL, sha256 text NOT NULL)');
+    const db = await this.pool.connect();
+    try {
+      await db.query('BEGIN');
+      await db.query('SELECT pg_advisory_xact_lock(4832941, 3)');
+      const existing = await db.query<{ table_name: string | null }>(
+        "SELECT to_regclass(format('%I.%I', current_schema(), 'ws_blob_bytes'))::text AS table_name",
+      );
+      if (!existing.rows[0]?.table_name) {
+        await db.query('CREATE TABLE ws_blob_bytes (key text PRIMARY KEY, bytes bytea NOT NULL, sha256 text NOT NULL)');
+      }
+      await db.query('COMMIT');
+    } catch (error) {
+      await db.query('ROLLBACK');
+      throw error;
+    } finally {
+      db.release();
+    }
   }
   async put(key: string, bytes: Uint8Array): Promise<void> {
     if (bytes.byteLength > this.maxBytes) throw new Error('Blob exceeds PostgreSQL baseline size limit; configure a managed object provider');
