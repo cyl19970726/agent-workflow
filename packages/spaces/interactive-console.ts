@@ -49,7 +49,7 @@ export interface InteractiveWorkflowHost {
   runStatus(runId: string): Promise<{ state: string; progress?: string; error?: string;
     /** null means no reviewable result; omitted preserves legacy hosts showing all deliverables. */
     reviewableAssetVersionId?: string | null;
-    sessions?: Array<{ sessionId: string; label: string }> }>; 
+    sessions?: Array<{ sessionId: string; label: string }> }>;
   isDeliverable(asset: AssetVersion): boolean;
   methods?: WorkflowMethodHost;
   execution?: {
