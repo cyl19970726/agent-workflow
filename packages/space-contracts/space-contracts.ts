@@ -161,6 +161,27 @@ function digest(value: unknown): string {
   return createHash('sha256').update(stableStringify(jsonCopy(value))).digest('hex');
 }
 
+const VALIDATOR_CACHE_CAPACITY = 128;
+const compiledValidators = new Map<string, ValidateFunction>();
+
+/** The validator configuration is fixed by this package; revision.hash binds its exact schema closure. */
+function cachedValidator(hash: string): ValidateFunction | undefined {
+  const validator = compiledValidators.get(hash);
+  if (!validator) return undefined;
+  compiledValidators.delete(hash);
+  compiledValidators.set(hash, validator);
+  return validator;
+}
+
+function cacheValidator(hash: string, validator: ValidateFunction): void {
+  compiledValidators.delete(hash);
+  compiledValidators.set(hash, validator);
+  if (compiledValidators.size > VALIDATOR_CACHE_CAPACITY) {
+    const oldest = compiledValidators.keys().next().value;
+    if (oldest !== undefined) compiledValidators.delete(oldest);
+  }
+}
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
     Object.values(value).forEach(deepFreeze);
@@ -248,6 +269,7 @@ export class SchemaRegistry {
     if (definition.dialect !== JSON_SCHEMA_DIALECT) fail('Only JSON Schema draft 2020-12 is supported');
     const schema = jsonCopy(definition.schema);
     if (!isObject(schema)) fail('A registered schema must have a JSON object root');
+    if (schema.$async === true) fail('Asynchronous JSON Schema validation is unsupported');
     if ('$schema' in schema && schema.$schema !== JSON_SCHEMA_DIALECT) fail('Schema $schema does not match its dialect');
     if ('$id' in schema && schema.$id !== schemaUri(definition)) fail('Schema $id must match its registry URI');
     const dependencies = (definition.dependencies ?? []).map((ref) => {
@@ -270,7 +292,8 @@ export class SchemaRegistry {
     }
     const frozen = deepFreeze({ namespace: definition.namespace, revision: definition.revision,
       hash, dialect: definition.dialect, schema, dependencies });
-    this.compile(frozen);
+    const validator = cachedValidator(frozen.hash) ?? this.compile(frozen);
+    this.validators.set(key, validator);
     this.revisions.set(key, frozen);
     return frozen;
   }
@@ -313,19 +336,24 @@ export class SchemaRegistry {
     return ordered;
   }
 
-  private compile(revision: FrozenSchemaRevision): void {
+  private compile(revision: FrozenSchemaRevision): ValidateFunction {
     const ajv = new Ajv2020({ allErrors: true, strict: false, validateSchema: true });
     for (const dependency of this.dependencyClosure(revision.dependencies)) {
       const source = dependency.schema as Record<string, JsonValue>;
       ajv.addSchema({ ...source, $id: schemaUri(dependency), $schema: JSON_SCHEMA_DIALECT }, schemaUri(dependency));
     }
+    let validator: ValidateFunction;
     try {
       const source = revision.schema as Record<string, JsonValue>;
-      const validator = ajv.compile({ ...source, $id: schemaUri(revision), $schema: JSON_SCHEMA_DIALECT });
-      this.validators.set(refKey(revision), validator);
+      validator = ajv.compile({ ...source, $id: schemaUri(revision), $schema: JSON_SCHEMA_DIALECT });
     } catch (error) {
       fail(`Invalid JSON Schema ${refKey(revision)}: ${String(error)}`);
     }
+    if ((validator as ValidateFunction & { $async?: boolean }).$async) {
+      fail(`Asynchronous JSON Schema validation is unsupported for ${refKey(revision)}`);
+    }
+    cacheValidator(revision.hash, validator);
+    return validator;
   }
 }
 
