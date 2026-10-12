@@ -246,7 +246,7 @@ harness 包裹节点的生命周期，并为该节点装配所需存储能力。
 | 步骤完成 | core 已有可选 `commitStepResult` 端口；PG store 可在一个事务中提交 artifact、step/attempt 状态、完成事件与幂等收据 | 完整 harness 需强制使用该能力；旧消费者继续保留原路径及原保证 |
 | attempt 恢复 | core 对原子提交结果未知的 running attempt 要求先对账，Space runtime bridge 保留已记录的节点上下文 | 继续完善跨执行器的已完成、确定失败、等待输入与结果未知判定，再决定复用、续接或重试 |
 
-对应代码见 [存储与执行端口](../packages/core/src/ports.ts)、[核心运行时](../packages/core/src/runtime.ts)、[SQLite 适配](../packages/sqlite/sqlite-run-store.ts)、[PostgreSQL 存储指南](postgres-storage.md)、[Space 存储指南](space-storage.md)和[Codex runner](../packages/codex/src/runner.ts)。单有 PostgreSQL RunStore 或 Space 确定性测试不能证明完整生产执行闭环成立。
+对应代码见 [存储与执行端口](../packages/core/src/ports.ts)、[核心运行时](../packages/core/src/runtime.ts)、[PostgreSQL 存储指南](postgres-storage.md)和[Space 存储指南](space-storage.md)。已退役的 SQLite store 与 Codex runner 不再是当前执行包；单有 PostgreSQL RunStore 或 Space 确定性测试不能证明完整生产执行闭环成立。
 
 ### 4.2 中断、重试与重复请求
 

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * Reading side of the private attempt trace written by `CodexSdkRunner`. Tuning a workflow starts from
+ * Read-only view of historical Codex attempt traces. Tuning a workflow starts from
  * what each agent actually did — what it ran, searched, failed on, how much it read and wrote — not from
  * the agent's own summary. These helpers turn one attempt directory into that evidence.
  */

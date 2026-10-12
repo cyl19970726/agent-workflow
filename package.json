@@ -10,7 +10,7 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "build": "npm run build -w @signal-room/workflow && npm run build -w @signal-room/workflow-codex && npm run build -w @signal-room/workflow-sqlite && npm run build -w @signal-room/workflow-postgres && npm run build -w @signal-room/workflow-space-contracts && npm run build -w @signal-room/workflow-spaces && npm run build -w @signal-room/workflow-read-model && npm run build -w @signal-room/workflow-agent-sdk && npm run build -w @signal-room/workflow-space-api && npm run build -w @signal-room/workflow-workbench-ui",
+    "build": "npm run build -w @signal-room/workflow && npm run build -w @signal-room/workflow-postgres && npm run build -w @signal-room/workflow-space-contracts && npm run build -w @signal-room/workflow-spaces && npm run build -w @signal-room/workflow-read-model && npm run build -w @signal-room/workflow-skill-snapshot && npm run build -w @signal-room/workflow-agent-sdk && npm run build -w @signal-room/workflow-space-api && npm run build -w @signal-room/workflow-workbench-ui",
     "prepare": "npm run build",
     "test": "vitest run",
     "verify": "npm run build && npm run check:docs && npm run check:examples && npm test && npm run examples",
