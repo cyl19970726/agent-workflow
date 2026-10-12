@@ -1,5 +1,5 @@
 {
-  "name": "@signal-room/workflow-sqlite",
+  "name": "@signal-room/workflow-skill-snapshot",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,12 +14,9 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=24"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json"
-  },
-  "dependencies": {
-    "@signal-room/workflow": "0.1.0"
   }
 }

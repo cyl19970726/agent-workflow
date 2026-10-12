@@ -2,13 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { codexSessionFile, summarizeCodexAttempt } from "./trace.js";
+import { codexSessionFile, summarizeCodexAttempt } from "./legacy-codex-trace.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 function temporaryRoot(): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-trace-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "historical-codex-trace-"));
   roots.push(root);
   return root;
 }

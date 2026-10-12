@@ -1,8 +1,10 @@
-# SIWC Responses runner
+# OpenAI Agents SDK runner with SIWC Responses transport
 
-This optional package connects the shared workflow `AgentRunner` to OpenAI's public Responses API using an app-owned **Continue with ChatGPT** connection. It uses ChatGPT plan authorization only. It never reads Codex credentials, accepts a Platform API key, or silently falls back to API billing.
+`OpenAIAgentsSdkRunner` adapts the workflow `AgentRunner` port to the official `@openai/agents` SDK (pinned here to `0.20.0`). The SDK `Agent` and `Runner.run` own the agent turn loop, tool dispatch, and conversation history. A custom SDK `Model` sends each model request to the OpenAI Responses endpoint using the app-owned **Continue with ChatGPT** authorization. SIWC is the authorization and model-transport path; it is not a replacement agent loop.
 
-Build from the `vendor/agent-workflow` workspace, then run:
+This is a deliberately bounded integration: it implements the workflow runner surface and the SIWC-compatible subset of the SDK model protocol. It does not claim support for every Agents SDK feature, provider, deployment mode, or native session-resume capability. The runner disables SDK cloud tracing because workflow events are persisted by the host; it does not enable a second remote trace exporter.
+
+The SIWC route uses ChatGPT plan authorization only. It never reads Codex credentials, accepts a Platform API key, or silently falls back to API billing. The app-owned login flow stores the renewable connection at `~/.config/creator-lab/workflow-siwc.json` with owner-only permissions. `login`, `status`, `models`, and `logout` are available through the package CLI:
 
 ```sh
 node packages/agent-sdk/dist/cli.js login
@@ -10,19 +12,25 @@ node packages/agent-sdk/dist/cli.js status
 node packages/agent-sdk/dist/cli.js models
 ```
 
-The `login` command starts an HTTP listener on `127.0.0.1`, opens OpenAI authorization in the system browser, verifies state, exchanges a PKCE code, validates the signed ID token and its identity, and saves credentials at `~/.config/creator-lab/workflow-siwc.json` with owner-only permissions. The user completes account selection and authorization in that browser. `logout` attempts to revoke the renewable session before removing local credentials and reports if remote revocation could not be confirmed. The saved connection supports one account; reconnecting verifies the same account identity. Credentials are never included in runner events or results.
+Construct the runner with the host's authenticated SIWC connection and attempt-bound tools:
 
 ```ts
-const runner = new SiwcResponsesRunner({
+const runner = new OpenAIAgentsSdkRunner({
   auth: new SiwcAuth(),
   tools: (request) => bindRestrictedToolsForAttempt(request),
+  timeoutMs: 180_000,
+  validateOutput: (value) => mySchema.parse(value),
   maxTurns: 8,
   maxToolCalls: 16,
 });
 ```
 
-`AgentDefinition.config.instructions` supplies the developer instructions; `outputFormat` may be `text` or `json`. The input is a string or JSON value. Tools must be injected by the host for each attempt; model output cannot register tools. Tool calls and results are recorded with their parsed arguments/output, call IDs and content hashes. Visible completed messages and function calls, plus text deltas, are emitted as observable events; opaque reasoning items are excluded. The host should bind tools to its node-scoped asset client and persist events in its restricted trace store with appropriate secret redaction and access controls. Tool output is returned to the model. A call fails if authorization is absent, the stream is incomplete, or tool/turn limits are reached. The runner uses `store:false`, `stream:true`, and sends full in-run history with every turn.
+The runner maps workflow instructions, model, reasoning effort, text/JSON output and input into an SDK `Agent` and invokes `Runner.run`. The host injects tool implementations for each attempt; model output cannot register tools. Tool calls are dispatched by the SDK and remain bound to the host's node-scoped capabilities. Tool calls/results, visible completed messages, text deltas, and safe provider error identifiers are emitted as `siwc.*` workflow events. Event metadata records `runtime: "openai-agents-sdk"`, `sdkPackage: "@openai/agents"`, and `sdkVersion: "0.20.0"`; the host remains responsible for durable storage, redaction, access controls, evidence binding, domain schemas, and quality gates. The host's final `validateOutput` runs after the SDK returns its final output.
 
-This is a SIWC **Responses adapter**, not an OpenAI Agents SDK integration. The current SIWC preview route has unsupported request fields and tool types, and the OpenAI devkit `@siwc/local` shown in the cookbook was not published to npm when this package was built. An authorized local account completed a bounded live `gpt-6-astra` producer and independent reviewer probe on 2026-10-04, including bound tool reads and durable outputs. This verifies that account and route, not creative quality or eligibility for every account; see the [Space integration guide](../../docs/space-storage.md). No model request is made by the deterministic tests.
+JSON output is parsed by the adapter. Hosts that require a top-level object can opt into Responses JSON object mode with `enforceJsonObject: true`; each model turn then sends `text.format: { type: "json_object" }` and an explicit JSON requirement in developer input. The default remains compatible with top-level arrays and text output. Hosts may also opt into bounded same-conversation technical corrections with `maxOutputValidationCorrections` (0 by default, maximum 3) and `outputValidationFeedback`. Corrections use the SDK result history and consume the same turn, tool-call, and timeout budgets. They do not relax domain validation or let the host rewrite model output.
 
-Official references: [registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in), [models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference), [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).
+For vision, the host can supply `images: (request) => SiwcImage[]` at the initial user turn or return a `SiwcVisualToolResult` from a bound tool. The custom model transport sends actual image bytes as Responses `input_image` data URLs; a path or OCR string alone does not give the model visual access. Events retain MIME types and image hashes, not base64 pixels. `timeoutMs` bounds when `run()` returns and composes with the workflow abort signal. It cannot forcibly stop host callbacks that ignore cancellation; their side effects must be cancellation-safe, and late callback results are ignored by the runner.
+
+The former `SiwcResponsesRunner` compatibility name has been removed. Consumers must use `OpenAIAgentsSdkRunner`. Existing event names beginning `siwc.` and PostgreSQL trace records are retained for persisted-run compatibility; new start/request events add the runtime and SDK identity metadata. `tracingDisabled: true` is deliberate: the existing restricted PostgreSQL workflow trace remains the record, with no implicit cloud SDK trace export.
+
+Official references: [OpenAI Agents SDK](https://openai.github.io/openai-agents-js/), [registration and sign-in](https://developers.openai.com/siwc/token-sharing-open-source/sign-in), [SIWC models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference), [SIWC preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations).

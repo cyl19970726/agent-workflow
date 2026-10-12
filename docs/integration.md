@@ -2,9 +2,9 @@
 
 接入前用 [设计](./designing-workflows.md)、[评估](./evaluating-workflows.md)、[优化](./optimizing-workflows.md)三份指南明确意图、交付和验收。方法建议与库已实现能力分别记录；下面说明现有执行基础设施的边界。
 
-下文主要说明**原有 core、Codex、SQLite 与 read-model 组合的接入方式**。另有可选的 PostgreSQL Space 服务、Schema Registry、节点合同、runtime bridge、只读控制台及 SIWC Responses 适配，见[Space 存储指南](space-storage.md)。完整共享工作台、一般 Agents SDK 和媒体 harness 尚未交付；目标职责见[架构](architecture.md)。
+新持久执行统一使用 **PostgreSQL + 官方 OpenAI Agents SDK**：PostgreSQL `RunStore`／Space 服务记录 run 与资产，`OpenAIAgentsSdkRunner` 负责 Agent/tool loop，SIWC 只负责当前 runner 所用的 ChatGPT 授权与 Responses model transport。具体实现状态和缺口见[建设路线](harness-roadmap.md)。SQLite 只用于明确启动的只读历史导入，Codex 历史 trace 由 read-model 只读解码；二者都不是新的执行路径或 fallback。接口边界见[Space 存储指南](space-storage.md)、[执行 harness 架构](postgres-sdk-plan.md)与[架构](architecture.md)。
 
-下文的“宿主”表示装配和运行应用的服务层，负责唯一任务队列、租约、worker 并发、HTTP 权限与读模型接入。它可以由 agent-workflow 的共享服务模块提供，不等于 creation 必须重新实现这些机制。现有接入代码仍有效；新业务目标应优先建设共享模块，再注入业务流程、资产类型、政策和阅读器。
+下文的“宿主”表示装配和运行应用的服务层，负责唯一任务队列、租约、worker 并发、HTTP 权限与读模型接入。它可以由 agent-workflow 的共享服务模块提供；research、analysis、creation 的业务流程、资产类型、政策和阅读器仍由各自工作台维护。
 
 ## 推荐组合
 
@@ -13,10 +13,14 @@
   ├─ 现有任务队列、租约、取消与 worker 上限
   ├─ workflow registry（按 id + revision 注册定义）
   ├─ ChildWorkflowDispatcher（把子运行交给同一队列）
-  ├─ RunStore
-  │    └─ SQLiteWorkflowRunStore 或宿主实现
+  ├─ PostgreSQL RunStore + Space 服务
+  │    └─ run / attempt / event / asset / evidence 的持久记录
   ├─ AgentRunner
-  │    └─ CodexSdkRunner 或宿主实现
+  │    └─ OpenAIAgentsSdkRunner（官方 SDK Agent / Runner / tool）
+  ├─ SIWC model transport
+  │    └─ 当前 ChatGPT authorization + Responses 路由；无 Codex/API-key/SQLite 执行 fallback
+  ├─ skill bundle snapshot
+  │    └─ @signal-room/workflow-skill-snapshot；由宿主冻结并绑定 revision
   └─ 安全读模型
        ├─ run / step / attempt / event 投影
        ├─ phase 与资产引用投影
@@ -29,28 +33,21 @@
 
 ## 端口边界
 
-[`RunStore`](../packages/core/src/ports.ts) 持久化 run、step、attempt、event 和 artifact 引用。事件序号必须在单个 run 内严格递增并由 store 原子分配。`SQLiteWorkflowRunStore` 已提供执行账本表和按 `afterSeq` 增量读取；它明确不提供任务领取、租约续期或调度。
+[`RunStore`](../packages/core/src/ports.ts) 持久化 run、step、attempt、event 和 artifact 引用。事件序号必须在单个 run 内严格递增并由 store 原子分配。新持久执行使用 `PostgresWorkflowRunStore`；它保存执行账本，但不负责任务领取、租约续期或调度。
 
-`AgentRunner` 接受冻结输入、AgentDefinition、AbortSignal、运行元数据与事件回调，并返回 output、可选 validation 和 metadata。共享 core 不知道 Codex，也不读取业务仓库。
+`AgentRunner` 接受冻结输入、AgentDefinition、AbortSignal、运行元数据与事件回调，并返回 output、可选 validation 和 metadata。共享 core 不依赖具体 Agent provider，也不读取业务仓库。
 
 `ChildWorkflowDispatcher` 只定义 `ensureChild` 和可选 `cancelChildren`。队列优先级、网络重试次数、模型并发上限、后代取消轮询与死信处理都由宿主实现。不要在共享库旁再建一套会与现有 worker 竞争的 scheduler。
 
-## SQLite 使用边界
+## 历史 SQLite 与 Codex 数据
 
-```ts
-import { DatabaseSync } from "node:sqlite";
-import { SQLiteWorkflowRunStore } from "@signal-room/workflow-sqlite";
+`@signal-room/workflow-sqlite` 与 `@signal-room/workflow-codex` 已从共享执行包集合移除。SQLite 仅在用户明确选择时，由消费项目的只读历史导入工具读取并转换到 PostgreSQL；导入不得回写源库、参与新 workflow 执行、被自动选为 `RunStore`，或在 PG 连接失败时成为 fallback。每个消费项目需要核对导入范围、数量、状态与内容 hash。
 
-const database = new DatabaseSync("/absolute/private/workflow.sqlite");
-database.exec("PRAGMA foreign_keys = ON");
-const store = new SQLiteWorkflowRunStore(database);
-```
-
-当前实现保存 JSON 文档，并建立 run/step/attempt/event/artifact 的必要索引。资产 payload 与元数据分开保存，读取 payload 时会校验 SHA-256。数据库位置、备份、迁移、事务范围和访问权限由宿主负责。
+既有 Codex attempt trace 仍可作为历史证据。共享 `@signal-room/workflow-read-model` 提供只读 decoder，可摘要显式指定的旧 attempt 目录；它不会继续 Codex session、运行命令、改写 trace 或创建可执行 run。当前模型执行由官方 Agents SDK runner 管理，skill bundle 由 `@signal-room/workflow-skill-snapshot` 独立捕获和物化。
 
 ## HTTP 与事件读取
 
-原有 core／SQLite／read-model 组合没有内置 HTTP、SSE 或 step-retry 路由；可选 Space 层已有只读 HTTP 控制台。宿主可围绕 `RunStore` 提供自己的授权 API，例如运行快照、`listEvents(runId, afterSeq)`、资产索引、取消和允许的修复动作。SSE 与增量轮询都可以基于事件 seq 实现；客户端必须按 seq 去重并支持刷新恢复。
+core／PostgreSQL／read-model 组合没有内置 HTTP、SSE 或 step-retry 路由；Space 层提供可选的只读 HTTP 控制台。宿主可围绕 `RunStore` 提供自己的授权 API，例如运行快照、`listEvents(runId, afterSeq)`、资产索引、取消和允许的修复动作。SSE 与增量轮询都可以基于事件 seq 实现；客户端必须按 seq 去重并支持刷新恢复。
 
 不要把“重试某一步”实现为直接把数据库状态改成通过。当前 core 的恢复单位是 workflow run：重新推进同一个 run，按指纹复用有效节点，对失败/失效路径创建新步骤或 attempt。业务上的定向修复通常应建成显式 repair workflow，并产出新资产版本。
 
@@ -73,7 +70,7 @@ Phase 是用户理解成果的入口，workflow/step/attempt 是执行审计层�
 
 ## 与 self-media #71 的关系
 
-[self-media #71](https://github.com/cyl19970726/self-media-content-intelligence/issues/71) 描述了单帖/博主研究、定向修复、阶段工作台和生产迁移目标。本仓库已经提供可组合 workflow、replay、具名并发、phase、资产来源、Codex runner 与 SQLite 账本这些通用构件；以下属于消费宿主的实现与验收责任（其中 self-media 已有相应实现，状态以其当前代码和验收记录为准）：
+[self-media #71](https://github.com/cyl19970726/self-media-content-intelligence/issues/71) 描述了单帖/博主研究、定向修复、阶段工作台和生产迁移目标。本仓库提供可组合 workflow、replay、具名并发、phase、资产来源、PostgreSQL 持久账本与官方 Agents SDK runner。下列是消费宿主需承担的实现与验收责任：
 
 - 复用现有研究任务队列、租约和全局模型并发限制的 dispatcher；
 - 单帖与博主的 prepare/build/review/repair 业务 workflow 及晋升规则；
