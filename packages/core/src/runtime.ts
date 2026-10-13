@@ -17,6 +17,14 @@ export class AtomicStepReconciliationRequiredError extends Error {
   }
 }
 
+/** A trusted atomic adapter rejected a result before it began the durable commit. */
+export class AtomicStepCommitRejectedError extends Error {
+  constructor(readonly reason: unknown) {
+    super(reason instanceof Error ? reason.message : String(reason), { cause: reason });
+    this.name = "AtomicStepCommitRejectedError";
+  }
+}
+
 export interface RunWorkflowOptions<Input, Output> {
   workflow: WorkflowDefinition<Input, Output>;
   input: Input;
@@ -403,7 +411,8 @@ class RuntimeContext implements WorkflowContext {
       // A harness may lose the durable acknowledgement after observing a model result.
       // Preserve the live attempt so resume must reconcile before invoking it again.
       if (error instanceof AtomicStepReconciliationRequiredError) throw error;
-      if (atomicCommitAttempted) {
+      const rejected = error instanceof AtomicStepCommitRejectedError ? error.reason : error;
+      if (atomicCommitAttempted && !(error instanceof AtomicStepCommitRejectedError)) {
         const committed = await this.reconcileCommittedStep(step.id, attempt.id, expectedCommit!);
         if (committed) {
           if (kind === "agent") this.rememberProducer(committed.output, step.id);
@@ -422,12 +431,12 @@ class RuntimeContext implements WorkflowContext {
       }
       const state = this.signal.aborted ? "canceled" : "failed";
       this.shared.executedKeys.delete(`${kind}:${stepKey}`);
-      await this.store.updateStep(step.id, { state, error: safeError(error) });
-      await this.store.updateAttempt(attempt.id, { state, error: safeError(error) });
-      await emit("step.failed", { error: safeError(error) });
+      await this.store.updateStep(step.id, { state, error: safeError(rejected) });
+      await this.store.updateAttempt(attempt.id, { state, error: safeError(rejected) });
+      await emit("step.failed", { error: safeError(rejected) });
       if (kind === "phase") await emit(state === "canceled" ? "phase.canceled" : "phase.failed",
-        { phaseId: step.phaseId, phasePath: step.phasePath, error: safeError(error) });
-      throw error;
+        { phaseId: step.phaseId, phasePath: step.phasePath, error: safeError(rejected) });
+      throw rejected;
     }
   }
   private async reconcileCommittedStep(stepRunId: string, attemptId: string,

@@ -11,12 +11,23 @@ describe('graph bridge', () => {
     expect(selectedGraphNode({ source: frame, data: { type: 'space-node-focus', nodeId: 'author' } } as MessageEvent, frame, ids)).toBeNull();
     expect(selectedGraphNode({ source: frame, data: { type: 'workflow-node-select', nodeId: 'unknown' } } as MessageEvent, frame, ids)).toBeNull();
   });
-  it('focuses allowed nodes without sending a reset or echo to unknown nodes', () => {
+  it('focuses allowed nodes, clears selection, and ignores unknown nodes', () => {
+    vi.mocked(frame.postMessage).mockClear();
     focusGraphNode(frame, 'author', ids);
     focusGraphNode(frame, undefined, ids);
     focusGraphNode(frame, 'unknown', ids);
-    expect(frame.postMessage).toHaveBeenCalledTimes(1);
+    expect(frame.postMessage).toHaveBeenCalledTimes(2);
     expect(frame.postMessage).toHaveBeenCalledWith({ type: 'space-node-focus', nodeId: 'author' }, '*');
+    expect(frame.postMessage).toHaveBeenCalledWith({ type: 'space-node-focus', nodeId: null }, '*');
+  });
+  it('uses the existing method graph message for declared expected assets only', () => {
+    const expectedId = 'expected:output:author:draft';
+    const methodIds = new Set(['author', expectedId]);
+    const message = { source: frame, data: { type: 'workflow-node-select', nodeId: expectedId } } as MessageEvent;
+    expect(selectedGraphNode(message, frame, methodIds)).toBe(expectedId);
+    expect(selectedGraphNode(message, frame, ids)).toBeNull();
+    focusGraphNode(frame, expectedId, methodIds);
+    expect(frame.postMessage).toHaveBeenLastCalledWith({ type: 'space-node-focus', nodeId: expectedId }, '*');
   });
   it('accepts readiness only from the current iframe and exact run identity, then sends a validated monotonic state', () => {
     const identity = { spaceId: 'space-1', runId: 'run-1', versionId: 'version-1' };

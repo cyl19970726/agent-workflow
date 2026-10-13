@@ -1,8 +1,10 @@
 # Agent Workflow
 
-把真实业务做成能执行、能评价、能持续改进的工作流。共享项目的目标范围包含工作流执行、PostgreSQL 资产管理 harness、一般 Agent SDK 接入、版本评价与通用工作台；业务项目提供流程、工具、标准与展示扩展。
+[产品全貌与按任务阅读](docs/documentation.md) · [产品架构](docs/product-architecture.md) · [方法工作路径](docs/workflow-practice.md) · [当前接入](docs/usage-and-integration.md) · [历史证据](docs/history-and-evidence.md)
 
-**先读 [产品定位](docs/product.md) → [Space 工作台产品与交互](docs/workbench-presentation.md) → [架构](docs/architecture.md) → [实现状态](docs/harness-roadmap.md)。** Space 支持用 workflow 完成业务并持续改进方法，覆盖从业务目的、首版设计到执行、稳定运营与持续改进的生命周期。工作流内以 Archify 画布切换方法、执行、运营观察和版本演进；业务与资产提供跨案例入口，评价在对象旁展开。现有存储、执行、阅读器和局部图可复用，整体前端尚未通过产品验收。SIWC 是应用自己的订阅登录与 Responses runner，尚不是一般 OpenAI Agents SDK；准确可用接口见 [Space 存储接入](docs/space-storage.md)，缺口只在[建设状态](docs/harness-roadmap.md)维护。
+把真实业务做成能执行、能评价、能持续改进的工作流。共享项目的目标范围包含工作流执行、PostgreSQL 资产管理 harness、官方 Agent SDK 接入、版本评价与通用工作台；业务项目提供流程、工具、标准与展示扩展。research、analysis、creation 的代码接线与 PostgreSQL + 官方 Agents SDK 迁移已完成，旧共享 Codex／SQLite 执行包与 SIWC runner alias 已移除。回归证据包括 root build、shared 600 项实际 PG 测试、analysis 613 项回归加 9 项定向 Reviewer 修复检查、research 33 项及实际历史导入和 UI 阅读、creation PG 回归与配置迁移。Creation launcher 已切换到新配置，main 和 first-design 的配置与 metadata 均为 `ordinary-content-20261012`；没有新模型运行或方法采用，原有 5 条 run 记录保持不变。单帖新运行已完成并可在浏览器阅读三 Lens 与图片，但候选为 `revised_unverified`：Reviewer 的一条相矛盾 minor finding 被正确驳回，未通过独立审阅。只读审计确认此前完整性缺口已修复，仍有少量精度备注；质量调优继续，不宣称整体质量成熟或全质量通过。
+
+**先读 [产品定位](docs/product.md) → [Space 工作台产品与交互](docs/workbench-presentation.md) → [架构](docs/architecture.md) → [实现状态](docs/harness-roadmap.md)。** Space 支持用 workflow 完成业务并持续改进方法，覆盖从业务目的、首版设计到执行、稳定运营与持续改进的生命周期。工作流内以 Archify 画布切换方法、执行、运营观察和版本演进；业务与资产提供跨案例入口，评价在对象旁展开。现有存储、执行、阅读器和局部图可复用，整体前端尚未通过产品验收。当前共享执行器由官方 OpenAI Agents SDK 的 Agent / Runner / tool 驱动；SIWC 只负责应用自持 ChatGPT 授权与受限 Responses model transport。三个工作台的代码迁移与指定回归已完成。新单帖运行和浏览器阅读已完成，候选保持 `revised_unverified`，未通过独立审阅；少量精度备注仍待质量调优。完整 SDK 功能覆盖和原生恢复也仍有边界；准确接口见 [Space 存储接入](docs/space-storage.md)，当前建设状态见[建设路线](docs/harness-roadmap.md)。新执行使用 PostgreSQL；SQLite 只用于显式只读历史导入，不作为执行 fallback。旧 Codex trace 由 read-model 只读解码。
 
 本库从 self-media 提交 `c460d1cd` 抽离；设计背景见 [Issue #71](https://github.com/cyl19970726/self-media-content-intelligence/issues/71)。该 Issue 包含设计草案和宿主产品要求，当前 API 与能力边界以这里的代码、文档和测试为准。
 
@@ -20,11 +22,11 @@
 - **关键流程怎么划分**，在全图中怎样理解定义与实际执行，点节点如何读产物、评价与证据；
 - **哪些资产给用户看**，哪些只进审计层，哪些永不暴露。
 
-内容始终由 workflow 里的 Agent 产出；主持调优的人或 Agent 只编排、评估和改 workflow，不替它补内容。具体做法见 **[调优循环](docs/tuning-loop.md)**；本库为此提供的支持：step key 防重复、按角色设置 Codex 环境、开跑前模型探针、trace 摘要与会话定位（见 [Codex 与 Skills](docs/codex-and-skills.md)），尚未解决的问题见 [Harness 路线](docs/harness-roadmap.md)。
+内容始终由 workflow 里的 Agent 产出；主持调优的人或 Agent 只编排、评估和改 workflow，不替它补内容。具体做法见 **[调优循环](docs/tuning-loop.md)**；本库为此提供的支持包括 step key 防重复、PG 执行账本、官方 Agents SDK runner、skill bundle snapshot，以及旧 Codex trace 的只读摘要（见 [Agent SDK 与历史 trace](docs/codex-and-skills.md)），尚未解决的问题见 [Harness 路线](docs/harness-roadmap.md)。
 
 ## 先跑起来
 
-完整 workspace 使用 Node.js 24；旧核心包仍兼容 ≥22.5。以下步骤不会调用真实模型：
+完整 workspace 使用 Node.js 24。以下步骤不会调用真实模型：
 
 ```bash
 git clone https://github.com/cyl19970726/agent-workflow.git
@@ -33,7 +35,7 @@ npm ci
 npm run verify
 ```
 
-`verify` 会构建十个包、检查文档链接、类型检查 Codex 示例、运行测试，并执行无模型示例。
+`verify` 会构建当前共享包、检查文档链接、类型检查示例、运行测试，并执行无模型示例。此工程检查用于验证共享仓库自身，不替代各工作台已完成的迁移回归证据，也不代表单帖真实端到端业务质量已通过。
 
 | 示例 | 能看到什么 |
 | --- | --- |
@@ -43,7 +45,7 @@ npm run verify
 | [失败后恢复](examples/failure-recovery.mjs) | 保留成功分支资产、只重试失败角色、恢复阶段绑定、区分执行完成与内容仍有意见 |
 | [前端工作台](examples/read-model-web.mjs) | 本机浏览器查看安全快照、失败 attempt、显式重试和增量更新；运行后打开终端显示的地址 |
 | [PostgreSQL 存储](examples/postgres-run.mjs) | 确定性 task 写入 PG；新建连接读回并校验正文，再对同一 run replay；不调用模型。需设置 `WORKFLOW_DATABASE_URL` |
-| [真实 Codex 接入](examples/codex-workflow.ts) | 显式模型配置、方法内容快照与哈希、独立 cwd、结构校验；默认只类型检查，调用导出函数才会运行模型 |
+| [Agents SDK 接入](examples/agents-sdk-workflow.ts) | 官方 `Agent`／`Runner.run`、skill hash 绑定、PostgreSQL store 由宿主传入；默认只类型检查，调用导出函数才会运行模型 |
 
 ## 文档
 
@@ -59,10 +61,11 @@ npm run verify
 | 使用空间存储、节点客户端与控制台 | [Space 存储接入](docs/space-storage.md) |
 | 使用目前实现的 PostgreSQL workflow-run store | [PG 存储指南](docs/postgres-storage.md) |
 | 查看完整资产 harness、SDK 与订阅接入方案 | [存储层与 SDK 执行闭环](docs/postgres-sdk-plan.md) |
+| 设计 Agent 只读查询目标、准确方法、节点和预期资产 | [最小 Operator CLI](docs/operator-cli.md) |
 | 在新项目中安装、运行第一个流程 | [快速开始](docs/getting-started.md) |
 | 从 session 历史或新意图设计阶段、步骤和资产 | [设计 Workflow](docs/designing-workflows.md) |
 | 编写小流程、并行、阶段、验证和资产 | [编写工作流与 API](docs/writing-workflows.md) |
-| 给每个 Agent 配模型、业务 skill、cwd 和 trace | [Codex 与方法 skill](docs/codex-and-skills.md) |
+| 使用官方 Agents SDK，或只读查看历史 Codex trace 与冻结 skill | [Agent SDK 与历史 trace](docs/codex-and-skills.md) |
 | 评估 workflow 自身的质量、稳定性和效率 | [Workflow 评估指南](docs/evaluating-workflows.md) |
 | 根据失败归因和对照实验改进流程 | [优化 Workflow](docs/optimizing-workflows.md) |
 | 一轮调优的实际步骤：冻结输入、读 trace、归因、重跑、定工作台显示 | [调优循环](docs/tuning-loop.md) |
@@ -71,22 +74,21 @@ npm run verify
 | 用共享读模型构建浏览器阶段工作台 | [前端读模型集成](docs/frontend-integration.md) |
 
 
-## 当前十个包
+## 当前共享包
 
 | 包 | 职责 |
 | --- | --- |
 | `@signal-room/workflow` | 独立于模型提供方的合同、运行时、replay、phase、并行和 MemoryRunStore |
-| `@signal-room/workflow-codex` | Codex SDK 调用、按角色的 Codex 环境、skill 快照、每次 attempt 的私有 trace 及其摘要、模型探针 |
-| `@signal-room/workflow-sqlite` | Node SQLite 执行记录、事件与资产存储 |
 | `@signal-room/workflow-postgres` | PostgreSQL run/step/attempt/event/artifact 存储、JSON 正文读取与可选原子步骤提交；不含完整 harness、调度或 SDK runner |
 | `@signal-room/workflow-space-contracts` | JSON Schema 注册与依赖冻结、节点存储合同、字段视图与动作校验 |
 | `@signal-room/workflow-spaces` | PG 空间领域、版本与会话、受限 client/tools、core 桥接、评价比较和只读控制台 |
-| `@signal-room/workflow-agent-sdk` | 应用自持 SIWC OAuth 与有边界的 Responses runner；不是已验收的 OpenAI Agents SDK |
+| `@signal-room/workflow-agent-sdk` | 官方 Agents SDK `AgentRunner` 适配、应用自持 SIWC OAuth 与受限单请求传输；见包内 README 的已实现范围 |
+| `@signal-room/workflow-skill-snapshot` | Provider-independent skill bundle capture、validation 与 materialization；不调用 Agent 或安装全局 skills |
 | `@signal-room/workflow-read-model` | 服务端范围查询与安全投影；`/contracts` 是浏览器安全类型入口 |
 | `@signal-room/workflow-space-api` | Space 查询与受限业务命令的 HTTP 合同和服务适配 |
 | `@signal-room/workflow-workbench-ui` | 共享 React 工作台、方法与运行画布、资产阅读和处理建议 |
 
-包通过 npm workspace 消费，当前不发布到 npm registry。浏览器只使用 `/contracts` 类型入口；服务端使用各包公共入口，不跨目录引用内部源码。
+包通过 workspace 消费，当前不发布到 npm registry。Creator Lab 使用根目录 pnpm workspace。已退役的 SQLite/Codex execution package 不再作为依赖；SQLite 历史只可显式只读导入，Codex traces 只可经 read-model 解码。浏览器只使用 `/contracts` 类型入口；服务端使用各包公共入口，不跨目录引用内部源码。
 
 ## 多项目共享源码
 
@@ -94,7 +96,7 @@ npm run verify
 git submodule add https://github.com/cyl19970726/agent-workflow.git vendor/agent-workflow
 ```
 
-把 `vendor/agent-workflow/packages/*` 加入消费项目的 npm workspaces，声明所需包依赖并在安装/启动前构建。可复制的配置见 [消费项目接入](docs/getting-started.md#作为-submodule-接入项目)。
+把 `vendor/agent-workflow/packages/*` 加入消费项目现有的 workspace，并通过对应包管理器声明依赖和在安装/启动前构建。Creator Lab 的 pnpm workspace 已包含这些包。可复制的配置见 [消费项目接入](docs/getting-started.md#作为-submodule-接入项目)。
 
 每个项目固定一个提交，升级由该项目主动选择。直接编辑 submodule 时：
 
@@ -109,6 +111,6 @@ git submodule add https://github.com/cyl19970726/agent-workflow.git vendor/agent
 - 按节点 replay，不恢复任意 JavaScript 堆栈，也不保证外部副作用 exactly-once。
 - 修改流程逻辑、闭包或内部方法配置时提升 workflow revision；新 revision 创建新 run，旧任务用旧定义恢复。
 - 执行成功、结构有效和独立质量复核通过是不同状态。
-- 当前 SQLite 账本不提供队列、租约或跨进程调度；新的 Space 服务、API 与 React 工作台提供独立的共享路径，业务注册领域阅读器和政策。当前实现与尚未完成的生产能力见建设路线，不能把原型路径验收等同于完整平台交付。
-- `0.1.0` 保留抽离前的执行记录格式；兼容测试验证旧 SQLite 节点无需重新调用 Agent 即可复用。业务 metadata 原样保存，查询使用 `listRuns({ metadata: { creatorRunId: '...' } })`。
+- PostgreSQL 是新持久 workflow run 的共享路径；队列、租约和跨进程调度仍由宿主或已登记的共享 execution manager 负责。SQLite 只可显式只读导入，绝不作为执行或故障 fallback。
+- 旧 SQLite run 与 Codex traces 保留为历史证据；只读导入／解码结果不能伪装成新 runner 产生的 run，也不自动触发 replay 或 Agent 调用。
 - 原始 prompt、事件 JSONL 和方法快照属于私有 trace。工作台提供安全投影，不能直接开放任意文件路径。

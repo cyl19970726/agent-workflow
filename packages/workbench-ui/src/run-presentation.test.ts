@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeCurrentRun, runStatusSummary, stateLabel } from './run-presentation.js';
+import { mergeCurrentRun, runScopeExplanation, runScopeLabel, runStatusSummary, stateLabel } from './run-presentation.js';
 
 describe('current run presentation', () => {
   it('replaces only the selected run snapshot in a bounded case list', () => {
@@ -13,5 +13,16 @@ describe('current run presentation', () => {
     expect(runStatusSummary({ state: 'queued', taskState: 'running', progress: null, assetCount: 0 })).toBe('排队中 · 已派发，准备执行 · 尚无可读产物');
     expect(runStatusSummary({ state: 'needs_review', taskState: 'completed', progress: '自动改稿次数用尽，尚未收敛', assetCount: 1 })).toContain('待审阅 · 自动改稿次数用尽，尚未收敛');
     expect(stateLabel('canceled')).toBe('已取消');
+  });
+
+  it('keeps trial completion separate from complete Case scope, including old and unknown records', () => {
+    const completedTrial = { executionMode: 'research-trial', state: 'completed', taskState: 'completed', assetCount: 1 };
+    expect(runScopeLabel(completedTrial)).toBe('研究节点试做（非完整运行）');
+    expect(runStatusSummary(completedTrial)).toBe('已完成 · 1 项已保存产物');
+    expect(runScopeExplanation(completedTrial)).toContain('不代表整个案例完成');
+    expect(runScopeLabel({ executionMode: 'case' })).toBe('完整案例运行');
+    expect(runScopeLabel({})).toBe('运行范围未记录');
+    expect(runScopeLabel({ executionMode: 'future-mode' })).toBe('运行范围未知（future-mode）');
+    expect(runScopeExplanation({ executionMode: 'future-mode' })).toContain('不能推断已完成整个案例');
   });
 });

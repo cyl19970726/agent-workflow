@@ -22,9 +22,11 @@
   },
   "dependencies": {
     "@signal-room/workflow-space-api": "0.1.0",
+    "markdown-it": "14.1.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/markdown-it": "14.2.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@tanstack/react-query": "^5.0.0",

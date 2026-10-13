@@ -85,7 +85,7 @@ export function createValidationWorkbench(options:ValidationWorkbenchOptions):Va
       const data=await service.overview(spaceId);
       if(!input.assetVersionIds.length||input.assetVersionIds.some(id=>{
         const asset=data.assets.find(value=>value.id===id);
-        return !asset||!options.isDeliverable(asset)||asset.source.kind!=='node'||asset.source.runId!==input.runId;
+        return !asset||!options.isDeliverable(asset)||!isRunAssetSource(asset.source)||asset.source.runId!==input.runId;
       }))throw new Error('Review requires exact deliverables of the associated run');
       await options.assertReviewable?.(input.runId,input.assetVersionIds);
       const review=await service.recordReview(spaceId,{id:input.id,runId:input.runId,assetVersionIds:input.assetVersionIds,
@@ -108,3 +108,4 @@ export function createValidationWorkbench(options:ValidationWorkbenchOptions):Va
     adopt:(planId,input)=>service.adopt(spaceId,{...input,validationPlanId:planId}),
   };
 }
+import {isRunAssetSource} from './types.js';

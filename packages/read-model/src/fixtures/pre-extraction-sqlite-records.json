@@ -1,0 +1,42 @@
+{
+  "fixturePurpose": "read-only historical record evidence; this package has no SQLite runtime adapter",
+  "source": "pre-extraction self-media adapter c460d1cd",
+  "records": {
+    "run": {
+      "id": "legacy-run-1",
+      "workflowId": "post.analyze",
+      "workflowRevision": "v5",
+      "inputFingerprint": "fnv1a64:83efd0bb9af64159",
+      "state": "succeeded",
+      "metadata": { "creatorRunId": "creator-legacy", "postExternalId": "post-legacy" },
+      "output": { "candidate": "retained", "evidenceRefs": ["source:1"] }
+    },
+    "step": {
+      "id": "legacy-step-1",
+      "runId": "legacy-run-1",
+      "key": "builder",
+      "kind": "agent",
+      "workflowId": "post.analyze",
+      "workflowRevision": "v5",
+      "inputFingerprint": "fnv1a64:c41761b8d7b13432",
+      "configFingerprint": "fnv1a64:ee16354f717325c5",
+      "state": "succeeded",
+      "validation": "valid",
+      "output": { "candidate": "retained", "evidenceRefs": ["source:1"] }
+    },
+    "attempt": { "id": "legacy-attempt-1", "runId": "legacy-run-1", "stepRunId": "legacy-step-1", "state": "succeeded" },
+    "artifact": {
+      "id": "legacy-artifact-1",
+      "type": "reconstruction",
+      "schemaVersion": "1",
+      "revision": "1",
+      "sha256": "76d95c26aa4b866e21550f28650f1a1c009a9d21c9fab2decb10684921cbf054",
+      "uri": "artifact://legacy/reconstruction",
+      "producedBy": { "workflowRunId": "legacy-run-1", "stepRunId": "legacy-step-1", "attemptId": "legacy-attempt-1" },
+      "dependsOn": [],
+      "validation": "valid",
+      "review": "passed"
+    },
+    "artifactPayload": { "candidate": "retained", "evidenceRefs": ["source:1"] }
+  }
+}

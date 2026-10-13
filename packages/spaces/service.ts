@@ -8,30 +8,61 @@ import {
   ContractValidationError, validateAgentOutput, verifyStorageContract,
   type SchemaDefinition, type FrozenSchemaRevision, type FrozenStorageContract,
 } from '@signal-room/workflow-space-contracts';
-import { bytesHash, type BlobStore } from './blob-store.js';
+import { bytesHash, isR2BlobKey, MAX_SINGLE_BLOB_BYTES, type BlobStore } from './blob-store.js';
 import { InvalidObservedOutputError } from './errors.js';
 import { publishProcessContract } from './process-contract.js';
 import type { HistoricalProcessResolver, ProcessView } from './process-projection.js';
 import { projectProcess } from './process-projection.js';
+import {copyHistoricalRunSet, verifyHistoricalRunSnapshot, type HistoricalRunImportInput} from './history-bridge.js';
 import { insertNodeRelations, validateRelationEvent, validateStoredRelation, persistRelation, queryRelationFacts, type ExplicitRelationEvent, projectRunRelations, type RelationProjection } from './relation.js';
 import { validateWorkflowPresentation, type WorkflowPresentationDraft, type WorkflowPresentation, type PresentationBinding, type ResolvedPresentation } from './presentation.js';
 import type {
-  SpacePrincipal, SpaceRole, WorkflowSpace, WorkflowVersionDraft, WorkflowVersion, SpaceCase, InputManifest,
+  SpacePrincipal, SpaceRole, WorkflowSpace, DesignSpaceCounts, DesignSpaceProvisionInput,
+  DesignSpaceProvisionReceipt, DesignSpaceState, WorkflowVersionDraft, WorkflowVersion, SpaceCase, InputManifest,
   SpaceRun, AssetSource, AssetVersion, AssetWrite, BlobManifest, NodeStart, NodeContext, NodeClient, NodeCommit, NodeReceipt,
-  DeliveredInput, SessionRecord, SessionEvent, KnowledgeRevision, ReviewDraft, Review, ComparisonDraft, Comparison,
+  DeliveredInput, SessionRecord, SessionEvent, KnowledgeRevision, SavedResponseTarget, ReviewDraft, Review, ComparisonDraft, Comparison,
   IterationDraft, AdoptionDraft, Adoption, SpaceOverview,
   ValidationPlanDraft, ValidationPlan, ValidationEntry, ValidationRunLink, ValidationReviewLink,
   ValidationComparison, ValidationIssueDraft, ValidationIssue, ValidationSummary, ValidationEntrySummary,
   ValidationJudgePolicy, ValidationJudgeEvidence,
 } from './types.js';
 import {validationEntries,validationStatuses,sameJson} from './validation.js';
+import {METHOD_DESIGN_SCHEMA_NAMESPACE,methodDesignRevision} from './method-design.js';
+import {METHOD_CAPABILITY_SCHEMA_NAMESPACE,methodCapabilityRevision} from './method-capability.js';
+import {BUSINESS_UNDERSTANDING_ASSET_ID, BUSINESS_UNDERSTANDING_SCHEMA_DEFINITION, BUSINESS_UNDERSTANDING_SCHEMA_REF} from './business-understanding.js';
+import {EXTERNAL_AGENT_OBSERVATION_SCHEMA_REF, EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF,
+  EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF,
+  externalAgentObservationAssetId, externalAgentAssetObservationAssetId,
+  externalAgentObservationReceipt, externalAgentAssetObservationReceipt,
+  type ExternalAgentObservationReceipt, type ExternalAgentAssetObservationReceipt,
+  type AnyExternalAgentObservationReceipt, type PublishedAssetTarget} from './external-agent-observation.js';
 
 type DB = Pool | PoolClient;
 const json = (value: unknown): string => JSON.stringify(value);
 const clone = <T>(value: T): T => structuredClone(value);
 const now = (): string => new Date().toISOString();
 const required = (value: string, name: string): void => { if (!value?.trim()) throw new Error(`${name} is required`); };
+function assertBlobManifest(spaceId:string,blob:BlobManifest):void{
+  if(blob.spaceId!==spaceId||blob.id!==blob.sha256||!/^[a-f0-9]{64}$/u.test(blob.sha256)||
+    !Number.isSafeInteger(blob.size)||blob.size<0||blob.backend==='r2'&&blob.size>MAX_SINGLE_BLOB_BYTES)
+    throw new Error('Blob manifest identity or size mismatch');
+  if(blob.backend==='r2'){
+    if(!isR2BlobKey(blob.key,spaceId,blob.sha256))throw new Error('R2 blob manifest key mismatch');
+  }else if(blob.backend!==undefined||blob.key!==`${spaceId}/${blob.sha256}`)
+    throw new Error('PostgreSQL blob manifest key mismatch');
+}
 const hash = artifactPayloadSha256;
+function pointerExists(root: unknown, pointer: string): boolean {
+  if(pointer==='') return true;
+  if(!pointer.startsWith('/') || /~(?![01])/.test(pointer)) return false;
+  let value:unknown=root;
+  for(const encoded of pointer.slice(1).split('/')) {
+    const part=encoded.replace(/~1/g,'/').replace(/~0/g,'~');
+    if(!value || typeof value!=='object' || !Object.hasOwn(value,part)) return false;
+    value=(value as Record<string,unknown>)[part];
+  }
+  return true;
+}
 const roles: SpaceRole[] = ['owner','creator','operator','viewer'];
 const writers: SpaceRole[] = ['owner','creator','operator'];
 function safeConfig(value:unknown):void {
@@ -49,9 +80,35 @@ function validateNodeDefinitions(entry: WorkflowVersionDraft['entrypoints'][stri
   for(const [id,definition] of Object.entries(entry.nodeDefinitions)) {
     if(!nodeIds.has(id)) throw new Error('Node definition must reference a declared node');
     if(!definition || typeof definition!=='object' || Array.isArray(definition)) throw new Error('Invalid node definition');
-    for(const key of Object.keys(definition))if(!['purpose','instructions','model','tools','executor','configuration'].includes(key))throw new Error('Unsupported node definition field');
+    for(const key of Object.keys(definition))if(!['purpose','instructions','model','tools','toolDefinitions','skills','executor','configuration'].includes(key))throw new Error('Unsupported node definition field');
     for(const key of ['purpose','instructions','model'] as const)if(definition[key]!==undefined && typeof definition[key]!=='string')throw new Error('Invalid node definition text');
     if(definition.tools!==undefined && (!Array.isArray(definition.tools)||definition.tools.some(tool=>typeof tool!=='string'||!tool.trim())))throw new Error('Invalid node definition tools');
+    if(definition.toolDefinitions!==undefined){
+      if(!Array.isArray(definition.toolDefinitions))throw new Error('Invalid node tool definitions');
+      const names=new Set<string>();
+      for(const item of definition.toolDefinitions){
+        if(!item||typeof item!=='object'||Array.isArray(item)||
+          Object.keys(item).some(key=>!['name','description','parameters','outputSchema'].includes(key))||
+          typeof item.name!=='string'||!item.name.trim()||names.has(item.name)||
+          typeof item.description!=='string'||!item.description.trim()||
+          !item.parameters||typeof item.parameters!=='object'||Array.isArray(item.parameters)||
+          (item.outputSchema!==undefined&&(!item.outputSchema||typeof item.outputSchema!=='object'||Array.isArray(item.outputSchema))))
+          throw new Error('Invalid node tool definitions');
+        if(definition.tools&&!definition.tools.includes(item.name))throw new Error('Node tool definition must match a declared tool name');
+        names.add(item.name);
+      }
+    }
+    if(definition.skills!==undefined){
+      if(!Array.isArray(definition.skills))throw new Error('Invalid node skill sources');
+      for(const item of definition.skills){
+        if(!item||typeof item!=='object'||Array.isArray(item)||
+          Object.keys(item).some(key=>!['name','sourceRef','revision'].includes(key))||
+          typeof item.name!=='string'||!item.name.trim()||
+          typeof item.sourceRef!=='string'||!item.sourceRef.trim()||
+          (item.revision!==undefined&&(typeof item.revision!=='string'||!item.revision.trim())))
+          throw new Error('Invalid node skill sources');
+      }
+    }
     if(definition.executor!==undefined) {
       const executor=definition.executor as unknown;
       if(!executor || typeof executor!=='object' || Array.isArray(executor))throw new Error('Invalid node executor');
@@ -96,8 +153,10 @@ const executionTask=(row:ExecutionRow):ExecutionTask=>({spaceId:row.space_id,run
  * The host authenticates principal IDs; membership and capabilities are checked here. */
 export class WorkflowSpaceService {
   constructor(private readonly pool: Pool, private readonly blobs: BlobStore, private readonly principal: SpacePrincipal,
-    private readonly presentationOptions: { readerIds?: readonly string[]; resultRoleIds?: readonly string[]; processResolvers?: Record<string, HistoricalProcessResolver> } = {}) {
+    private readonly presentationOptions: { readerIds?: readonly string[]; resultRoleIds?: readonly string[]; processResolvers?: Record<string, HistoricalProcessResolver>; historicalSourceWorkspaceIds?: readonly string[] } = {}) {
     required(principal.id,'Authenticated principal');
+    if(principal.externalAgent && (principal.kind!=='service'||!principal.externalAgent.id?.trim()||!principal.externalAgent.sessionId?.trim()))
+      throw new Error('External Agent credential requires a trusted service principal and fixed identity/session');
   }
   private async tx<T>(work: (db: PoolClient) => Promise<T>): Promise<T> {
     const db = await this.pool.connect();
@@ -156,6 +215,75 @@ export class WorkflowSpaceService {
       return space;
     });
   }
+  /** Host-only human-owner action. `designer` must come from a trusted credential, never an HTTP body. */
+  async provisionDesignSpace(input: DesignSpaceProvisionInput, designer: SpacePrincipal): Promise<DesignSpaceProvisionReceipt> {
+    if(this.principal.kind!=='human')throw new Error('Design Space provisioning requires a human owner');
+    if(designer.kind!=='service'||designer.externalAgent?.role!=='design'||
+      !designer.id?.trim()||!designer.externalAgent.id?.trim()||!designer.externalAgent.sessionId?.trim()||
+      designer.id===this.principal.id)throw new Error('Design Space provisioning requires a trusted design Agent');
+    required(input.id,'Design Space ID');required(input.purpose,'Business purpose');
+    required(input.scope?.workflowId,'Design workflow ID');required(input.scope?.entrypoint,'Design entrypoint');
+    required(input.idempotencyKey,'Idempotency key');
+    const scope={workflowId:input.scope.workflowId,entrypoint:input.scope.entrypoint};
+    const createdBy={agentId:designer.externalAgent.id,sessionId:designer.externalAgent.sessionId,principalId:designer.id};
+    const requestHash=await hash({id:input.id,purpose:input.purpose,scope,owner:this.principal.id,createdBy});
+    const commitScope=`designSpaceProvision:${this.principal.id}`;
+    return this.tx(async db=>{
+      // The receipt has a Space FK, so serialize by owner/key before the Space exists.
+      await db.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))',[commitScope,input.idempotencyKey]);
+      const prior=await db.query<{request_hash:string;receipt:DesignSpaceProvisionReceipt}>(
+        'SELECT request_hash,receipt FROM ws_commits WHERE scope=$1 AND idempotency_key=$2 LIMIT 1',
+        [commitScope,input.idempotencyKey]);
+      if(prior.rows[0]){
+        if(prior.rows[0].request_hash!==requestHash)throw new Error('Idempotency conflict');
+        return prior.rows[0].receipt;
+      }
+      const space:WorkflowSpace={id:input.id,purpose:input.purpose,owner:this.principal.id,status:'active',createdAt:now(),
+        designScope:scope,provisionedBy:createdBy};
+      const inserted=await db.query<{id:string}>(
+        'INSERT INTO ws_spaces(id,document) VALUES($1,$2::jsonb) ON CONFLICT(id) DO NOTHING RETURNING id',
+        [space.id,json(space)]);
+      if(!inserted.rows[0])throw new Error('Space already exists');
+      await db.query('INSERT INTO ws_members(space_id,principal_id,role) VALUES($1,$2,$3),($1,$4,$5)',
+        [space.id,this.principal.id,'owner',designer.id,'operator']);
+      const frozen=new SchemaRegistry().registerSchema(BUSINESS_UNDERSTANDING_SCHEMA_DEFINITION);
+      if(frozen.hash!==BUSINESS_UNDERSTANDING_SCHEMA_REF.hash||frozen.dependencies.length)
+        throw new Error('Business understanding schema registration failed');
+      await db.query('INSERT INTO ws_schemas(space_id,namespace,revision,hash,document) VALUES($1,$2,$3,$4,$5::jsonb)',
+        [space.id,frozen.namespace,frozen.revision,frozen.hash,json(frozen)]);
+      const initialCounts:DesignSpaceCounts={workflowVersions:0,understandingRevisions:0,methodDesignRevisions:0,
+        cases:0,runs:0,businessAssets:0,assetVersions:0,adoptions:0};
+      const receipt:DesignSpaceProvisionReceipt={space,scope,createdBy,initialCounts};
+      await db.query('INSERT INTO ws_commits(space_id,scope,idempotency_key,request_hash,receipt) VALUES($1,$2,$3,$4,$5::jsonb)',
+        [space.id,commitScope,input.idempotencyKey,requestHash,json(receipt)]);
+      return receipt;
+    });
+  }
+  /** Read the actual full-Space state; understanding/design revisions also count as asset versions. */
+  async designSpaceState(spaceId:string):Promise<DesignSpaceState> {
+    const space=await this.access(this.pool,spaceId);
+    if(!space.designScope||!space.provisionedBy)throw new Error('Space is not a provisioned design Space');
+    const result=await this.pool.query<{
+      workflow_versions:number;understanding_revisions:number;method_design_revisions:number;
+      cases:number;runs:number;business_assets:number;asset_versions:number;adoptions:number;
+      understanding_revision_id:string|null;
+    }>(`SELECT
+      (SELECT count(*)::int FROM ws_workflows WHERE space_id=$1) AS workflow_versions,
+      (SELECT count(*)::int FROM ws_asset_versions WHERE space_id=$1 AND asset_id=$2 AND namespace=$3) AS understanding_revisions,
+      (SELECT count(*)::int FROM ws_asset_versions WHERE space_id=$1 AND namespace=$4) AS method_design_revisions,
+      (SELECT count(*)::int FROM ws_cases WHERE space_id=$1) AS cases,
+      (SELECT count(*)::int FROM ws_runs WHERE space_id=$1) AS runs,
+      (SELECT count(*)::int FROM ws_assets WHERE space_id=$1 AND namespace NOT IN ($3,$4,$5)) AS business_assets,
+      (SELECT count(*)::int FROM ws_asset_versions WHERE space_id=$1) AS asset_versions,
+      (SELECT count(*)::int FROM ws_adoptions WHERE space_id=$1) AS adoptions,
+      (SELECT head_id FROM ws_assets WHERE space_id=$1 AND id=$2 AND namespace=$3) AS understanding_revision_id`,
+      [spaceId,BUSINESS_UNDERSTANDING_ASSET_ID,BUSINESS_UNDERSTANDING_SCHEMA_REF.namespace,METHOD_DESIGN_SCHEMA_NAMESPACE,METHOD_CAPABILITY_SCHEMA_NAMESPACE]);
+    const row=result.rows[0]!;
+    return {space,scope:space.designScope,counts:{workflowVersions:row.workflow_versions,
+      understandingRevisions:row.understanding_revisions,methodDesignRevisions:row.method_design_revisions,
+      cases:row.cases,runs:row.runs,businessAssets:row.business_assets,assetVersions:row.asset_versions,
+      adoptions:row.adoptions},understandingRevisionId:row.understanding_revision_id};
+  }
   async listSpaces(): Promise<WorkflowSpace[]> {
     return (await this.pool.query<{document: WorkflowSpace}>('SELECT s.document FROM ws_spaces s JOIN ws_members m ON m.space_id=s.id WHERE m.principal_id=$1',[this.principal.id])).rows.map(r=>r.document);
   }
@@ -191,6 +319,31 @@ export class WorkflowSpaceService {
         const predecessor=await this.one<WorkflowVersion>(db,'ws_workflows',spaceId,draft.predecessorId);
         if(!Object.values(predecessor.entrypoints).some(prior=>Object.values(draft.entrypoints).some(entry=>entry.workflowId===prior.workflowId))) {
           throw new Error('Workflow predecessor must share an executable workflow identity');
+        }
+      }
+      if(draft.designBasis) {
+        const basis=draft.designBasis;
+        for(const field of ['designRevisionId','designPayloadHash','understandingRevisionId','understandingPayloadHash'] as const) required(basis[field],`Design basis ${field}`);
+        const designAsset=await this.asset(db,spaceId,basis.designRevisionId);
+        const design=methodDesignRevision(designAsset);
+        const understandingAsset=await this.asset(db,spaceId,basis.understandingRevisionId);
+        if(understandingAsset.assetId!==BUSINESS_UNDERSTANDING_ASSET_ID || understandingAsset.schema.namespace!==BUSINESS_UNDERSTANDING_SCHEMA_REF.namespace ||
+          understandingAsset.schema.revision!==BUSINESS_UNDERSTANDING_SCHEMA_REF.revision || understandingAsset.schema.hash!==BUSINESS_UNDERSTANDING_SCHEMA_REF.hash ||
+          understandingAsset.source.kind!=='import')throw new Error('Design basis must reference a Space business understanding revision');
+        if(design.payloadHash!==basis.designPayloadHash || understandingAsset.payloadHash!==basis.understandingPayloadHash ||
+          design.understanding.revisionId!==basis.understandingRevisionId || design.understanding.payloadHash!==basis.understandingPayloadHash) {
+          throw new Error('Design basis revision/hash mismatch');
+        }
+        if(!Object.hasOwn(draft.entrypoints,design.entrypoint) || draft.entrypoints[design.entrypoint]?.workflowId!==design.workflowId) {
+          throw new Error('Design basis workflow identity/entrypoint mismatch');
+        }
+        if(design.capability){
+          const capability=methodCapabilityRevision(await this.asset(db,spaceId,design.capability.revisionId));
+          if(capability.payloadHash!==design.capability.payloadHash || capability.workflowId!==design.workflowId ||
+            capability.entrypoint!==design.entrypoint || capability.understanding.revisionId!==basis.understandingRevisionId ||
+            capability.understanding.payloadHash!==basis.understandingPayloadHash ||
+            (capability.predecessorVersionId??undefined)!==draft.predecessorId || capability.changeReason!==draft.changeReason)
+            throw new Error('Design capability basis or predecessor/change reason mismatch');
         }
       }
       const registry = await this.registry(db,spaceId);
@@ -328,6 +481,49 @@ export class WorkflowSpaceService {
       });
     });
   }
+  /** Bind exact terminal ledger history to a Space without starting a new execution. */
+  async importHistoricalRuns(spaceId:string,input:HistoricalRunImportInput):Promise<SpaceRun[]> {
+    if(!this.presentationOptions.historicalSourceWorkspaceIds?.includes(input.sourceWorkspaceId))
+      throw new Error('Historical source workspace is not authorized by the host');
+    if(!input.runs.length||input.runs.length>32||new Set(input.runs.map(run=>run.runId)).size!==input.runs.length)
+      throw new Error('Historical import requires 1–32 distinct runs');
+    return this.tx(async db=>{
+      await this.access(db,spaceId,['owner','creator'],true);await this.lock(db,spaceId);
+      const bindings:SpaceRun[]=[];
+      const missing:string[]=[];
+      for(const item of input.runs){
+        const version=await this.one<WorkflowVersion>(db,'ws_workflows',spaceId,item.workflowVersionId);
+        const entry=version.entrypoints[item.entrypoint];
+        if(!entry)throw new Error('Unknown historical workflow entrypoint');
+        const manifest=await this.one<InputManifest>(db,'ws_manifests',spaceId,item.inputManifestId);
+        const config=item.effectiveConfig??version.config;
+        safeConfig(config);
+        const source=(await db.query<{document:RunRecord}>(
+          'SELECT document FROM aw_runs WHERE workspace_id=$1 AND id=$2',[input.sourceWorkspaceId,item.runId])).rows[0]?.document;
+        if(!source||source.workflowId!==entry.workflowId||source.workflowRevision!==entry.codeRevision)
+          throw new Error('Historical executable identity does not match frozen entrypoint');
+        if(!['succeeded','failed','canceled','blocked','needs_review'].includes(source.state))
+          throw new Error('Historical run must reach a terminal state before import');
+        const binding:SpaceRun={runId:item.runId,spaceId,workflowVersionId:version.id,entrypoint:item.entrypoint,
+          caseId:manifest.caseId,inputManifestId:manifest.id,effectiveConfig:clone(config),configHash:await hash(config),
+          executionMode:'imported',historicalSource:{workspaceId:input.sourceWorkspaceId,runId:item.runId}};
+        const prior=(await db.query<{document:SpaceRun}>(
+          'SELECT document FROM ws_runs WHERE space_id=$1 AND run_id=$2',[spaceId,item.runId])).rows[0]?.document;
+        if(prior){
+          if(await hash(prior)!==await hash(binding))throw new Error('Historical run binding conflicts with existing run');
+          await verifyHistoricalRunSnapshot(db,spaceId,{workspaceId:input.sourceWorkspaceId,runId:item.runId});
+        }else missing.push(item.runId);
+        bindings.push(binding);
+      }
+      if(missing.length)await copyHistoricalRunSet(db,spaceId,input.sourceWorkspaceId,missing);
+      for(const binding of bindings){
+        if(!missing.includes(binding.runId))continue;
+        await db.query('INSERT INTO ws_runs(space_id,run_id,workflow_version_id,case_id,manifest_id,document) VALUES($1,$2,$3,$4,$5,$6::jsonb)',
+          [spaceId,binding.runId,binding.workflowVersionId,binding.caseId,binding.inputManifestId,json(binding)]);
+      }
+      return bindings;
+    });
+  }
   private async asset(db: DB, spaceId: string, id: string): Promise<AssetVersion> {
     const asset = await this.one<AssetVersion>(db,'ws_asset_versions',spaceId,id);
     if (await hash(asset.payload) !== asset.payloadHash) throw new Error('Asset payload integrity check failed');
@@ -338,6 +534,20 @@ export class WorkflowSpaceService {
     await this.access(this.pool,spaceId);
     const asset = await this.asset(this.pool,spaceId,id);
     return {...asset,state:await this.state(this.pool,spaceId,asset)};
+  }
+  /** Read only one logical asset's current version. The caller must still verify its schema. */
+  async readAssetHead(spaceId: string, assetId: string): Promise<AssetVersion | null> {
+    await this.access(this.pool,spaceId);
+    const result = await this.pool.query<{head_id:string|null}>(
+      'SELECT head_id FROM ws_assets WHERE space_id=$1 AND id=$2',[spaceId,assetId]);
+    return result.rows[0]?.head_id ? this.asset(this.pool,spaceId,result.rows[0].head_id) : null;
+  }
+  /** Read the immutable revisions of one logical asset in version order. */
+  async readAssetHistory(spaceId: string, assetId: string): Promise<AssetVersion[]> {
+    await this.access(this.pool,spaceId);
+    const result = await this.pool.query<{id:string}>(
+      'SELECT id FROM ws_asset_versions WHERE space_id=$1 AND asset_id=$2 ORDER BY version ASC',[spaceId,assetId]);
+    return Promise.all(result.rows.map(row=>this.asset(this.pool,spaceId,row.id)));
   }
   private async state(db: DB, spaceId: string, asset: AssetVersion): Promise<string> {
     const rows = await db.query<{document:{to:string}}>('SELECT document FROM ws_transitions WHERE space_id=$1 AND version_id=$2 ORDER BY ordinal DESC LIMIT 1',[spaceId,asset.id]);
@@ -362,12 +572,13 @@ export class WorkflowSpaceService {
     const attachments: BlobManifest[] = [];
     for (const id of [...new Set(input.blobIds??[])]) {
       const blob = await this.one<BlobManifest>(db,'ws_blobs',spaceId,id);
+      assertBlobManifest(spaceId,blob);
       const bytes = await this.blobs.get(blob.key);
       if (bytesHash(bytes)!==blob.sha256 || bytes.byteLength!==blob.size) throw new Error('Blob integrity check failed');
       attachments.push(blob);
     }
     const version: AssetVersion = {id:randomUUID(),spaceId,assetId,version:existing.rows[0]?.next_version??1,schema:clone(input.schema),payload:clone(input.payload),payloadHash:await hash(input.payload),source,dependencies,attachments,initialState,createdAt:now()};
-    const producer = source.kind==='node'?source:undefined;
+    const producer = source.kind==='node'||source.kind==='historical-artifact'?source:undefined;
     await db.query('INSERT INTO ws_asset_versions(space_id,id,asset_id,version,namespace,schema_revision,schema_hash,run_id,step_run_id,attempt_id,document) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)',
       [spaceId,version.id,assetId,version.version,input.schema.namespace,input.schema.revision,input.schema.hash,producer?.runId??null,producer?.stepRunId??null,producer?.attemptId??null,json(version)]);
     for (const id of dependencies) await db.query('INSERT INTO ws_asset_dependencies(space_id,version_id,dependency_id) VALUES($1,$2,$3)',[spaceId,version.id,id]);
@@ -381,6 +592,34 @@ export class WorkflowSpaceService {
       return this.idempotent(db,spaceId,'import',input.idempotencyKey,input,()=>this.writeAsset(db,spaceId,input,{kind:'import',actorId:this.principal.id,description:input.description},'imported'));
     });
   }
+  /** Publish one already-imported ledger artifact as a schema-checked domain asset with explicit historical provenance. */
+  async publishHistoricalArtifact(spaceId:string,input:{artifactId:string;schema:AssetWrite['schema'];assetId?:string;idempotencyKey:string}):Promise<AssetVersion>{
+    return this.tx(async db=>{
+      await this.access(db,spaceId,['owner','creator'],true);
+      required(input.artifactId,'Historical artifact ID');
+      return this.idempotent(db,spaceId,'historicalArtifact',input.idempotencyKey,input,async()=>{
+        const ledger=this.ledger(spaceId).inTransaction(db);
+        const artifact=await ledger.getArtifact(input.artifactId);
+        if(!artifact)throw new Error('Historical artifact is not in the Space ledger');
+        const binding=await this.one<SpaceRun>(db,'ws_runs',spaceId,artifact.producedBy.workflowRunId,'run_id');
+        if(binding.executionMode!=='imported'||binding.historicalSource?.runId!==artifact.producedBy.workflowRunId)
+          throw new Error('Artifact producer is not an imported run');
+        const payload=await ledger.getArtifactPayload(artifact.id);
+        if(await hash(payload)!==artifact.sha256)throw new Error('Historical artifact payload hash mismatch');
+        const mapped=(await db.query<{version_id:string}>(
+          'SELECT version_id FROM ws_runtime_artifacts WHERE space_id=$1 AND artifact_id=$2',[spaceId,artifact.id])).rows[0];
+        if(mapped)throw new Error('Historical artifact already has a domain publication');
+        const source:AssetSource={kind:'historical-artifact',runId:artifact.producedBy.workflowRunId,
+          stepRunId:artifact.producedBy.stepRunId,attemptId:artifact.producedBy.attemptId,artifactId:artifact.id,
+          sourceWorkspaceId:binding.historicalSource.workspaceId,originalSha256:artifact.sha256,originalUri:artifact.uri};
+        const version=await this.writeAsset(db,spaceId,{assetId:input.assetId??`historical-artifact:${artifact.id}`,
+          schema:input.schema,payload},source,'candidate');
+        await db.query('INSERT INTO ws_runtime_artifacts(space_id,artifact_id,version_id) VALUES($1,$2,$3)',
+          [spaceId,artifact.id,version.id]);
+        return version;
+      });
+    });
+  }
   async transformAsset(spaceId: string, input: AssetWrite & {operation: string; description: string}): Promise<AssetVersion> {
     return this.tx(async db=> {
       await this.access(db,spaceId,['owner','creator'],true);
@@ -391,17 +630,36 @@ export class WorkflowSpaceService {
   }
   async uploadBlob(spaceId: string, bytes: Uint8Array, mediaType: string): Promise<BlobManifest> {
     await this.access(this.pool,spaceId,writers,true); required(mediaType,'Media type');
-    const sha256 = bytesHash(bytes), key = `${spaceId}/${sha256}`;
-    await this.blobs.put(key,bytes);
+    if(bytes.byteLength===0)throw new Error('Blob upload requires nonempty bytes');
+    if(bytes.byteLength>MAX_SINGLE_BLOB_BYTES)throw new Error('Blob exceeds 16 MiB single-upload limit');
+    const sha256 = bytesHash(bytes);
+    const prior=(await this.pool.query<{document:BlobManifest}>('SELECT document FROM ws_blobs WHERE space_id=$1 AND id=$2',[spaceId,sha256])).rows[0]?.document;
+    if(prior){
+      assertBlobManifest(spaceId,prior);
+      if(prior.size!==bytes.byteLength||prior.mediaType!==mediaType)throw new Error('Blob manifest content or media type conflict');
+      const retained=await this.blobs.get(prior.key);
+      if(retained.byteLength!==bytes.byteLength||bytesHash(retained)!==sha256)throw new Error('Blob integrity check failed');
+      return prior;
+    }
+    const key=this.blobs.keyFor?.(spaceId,sha256)??`${spaceId}/${sha256}`;
+    const backend=isR2BlobKey(key,spaceId,sha256)?'r2' as const:undefined;
+    if(!backend&&key!==`${spaceId}/${sha256}`)throw new Error('Blob store returned unsupported content key');
+    await this.blobs.put(key,bytes,mediaType);
     const stored = await this.blobs.get(key);
     if (bytesHash(stored)!==sha256 || stored.byteLength!==bytes.byteLength) throw new Error('Blob upload verification failed');
-    const manifest: BlobManifest = {id:sha256,spaceId,sha256,size:bytes.byteLength,mediaType,key};
+    const manifest: BlobManifest = {id:sha256,spaceId,sha256,size:bytes.byteLength,mediaType,key,...(backend?{backend}:{})};
     await this.pool.query('INSERT INTO ws_blobs(space_id,id,document) VALUES($1,$2,$3::jsonb) ON CONFLICT(space_id,id) DO NOTHING',[spaceId,manifest.id,json(manifest)]);
-    return this.one(this.pool,'ws_blobs',spaceId,manifest.id);
+    const recorded=await this.one<BlobManifest>(this.pool,'ws_blobs',spaceId,manifest.id);
+    assertBlobManifest(spaceId,recorded);
+    if(recorded.size!==bytes.byteLength||recorded.mediaType!==mediaType)throw new Error('Blob manifest content or media type conflict');
+    const recordedBytes=await this.blobs.get(recorded.key);
+    if(recordedBytes.byteLength!==bytes.byteLength||bytesHash(recordedBytes)!==sha256)throw new Error('Blob integrity check failed');
+    return recorded;
   }
   async readBlob(spaceId: string, id: string): Promise<Uint8Array> {
     await this.access(this.pool,spaceId);
     const manifest = await this.one<BlobManifest>(this.pool,'ws_blobs',spaceId,id);
+    assertBlobManifest(spaceId,manifest);
     const bytes = await this.blobs.get(manifest.key);
     if (bytesHash(bytes)!==manifest.sha256 || bytes.byteLength!==manifest.size) throw new Error('Blob integrity check failed');
     return bytes;
@@ -535,7 +793,7 @@ export class WorkflowSpaceService {
       if('judge' in draft || 'spaceId' in draft) throw new Error('System evaluation identity cannot be overridden');
       const allowed=new Set(Object.values(context.inputs).map(i=>i.assetVersionId));
       if(!Array.isArray(draft.assetVersionIds)||!Array.isArray(draft.evidence)||[...draft.assetVersionIds,...draft.evidence].some(id=>!allowed.has(id))) throw new Error('Evaluation evidence is not bound to this node');
-      return this.recordReview(spaceId,{...draft,judge:{kind:'agent',id:context.nodeId,sessionId:context.sessionId}});
+      return this.recordReviewFromNode(spaceId,{...draft,judge:{kind:'agent',id:context.nodeId,sessionId:context.sessionId}},context.id);
     }});
   }
   private async appendSession(db: PoolClient, spaceId: string, context: NodeContext, key: string, kind: SessionEvent['kind'], body: unknown): Promise<SessionEvent> {
@@ -567,6 +825,18 @@ export class WorkflowSpaceService {
     if (!Number.isInteger(after)||after<0||!Number.isInteger(limit)||limit<1||limit>1000) throw new Error('Invalid event cursor or page size');
     const rows = await this.pool.query<{document:SessionEvent}>('SELECT document FROM ws_session_events WHERE space_id=$1 AND session_id=$2 AND seq>$3 ORDER BY seq LIMIT $4',[spaceId,sessionId,after,limit+1]);
     const items = rows.rows.slice(0,limit).map(r=>r.document);
+    return {items,nextCursor:items.at(-1)?.seq??after,hasMore:rows.rows.length>limit};
+  }
+  /** Bounded, allowlisted runner evidence; skips high-volume text deltas and private trace bodies. */
+  async runtimeEvents(spaceId:string,sessionId:string,after=0,limit=100):Promise<{items:SessionEvent[];nextCursor:number;hasMore:boolean}> {
+    await this.access(this.pool,spaceId);
+    await this.one(this.pool,'ws_sessions',spaceId,sessionId);
+    if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(limit)||limit<1||limit>100)throw new Error('Invalid runtime event cursor or page size');
+    const rows=await this.pool.query<{document:SessionEvent}>(`SELECT document FROM ws_session_events
+      WHERE space_id=$1 AND session_id=$2 AND seq>$3 AND document->>'kind'='trace'
+      AND document->'body'->>'type' IN ('siwc.started','siwc.tool_call','siwc.tool_result','siwc.tool_failed')
+      ORDER BY seq LIMIT $4`,[spaceId,sessionId,after,limit+1]);
+    const items=rows.rows.slice(0,limit).map(row=>row.document);
     return {items,nextCursor:items.at(-1)?.seq??after,hasMore:rows.rows.length>limit};
   }
   async submitNode(spaceId: string, contextId: string, commit: NodeCommit, runtimeCommit?: StepResultCommit): Promise<NodeReceipt> {
@@ -641,7 +911,7 @@ export class WorkflowSpaceService {
         const asset = await this.asset(db,spaceId,input.assetVersionId);
         const version = await this.one<WorkflowVersion>(db,'ws_workflows',spaceId,input.workflowVersionId),contract = version.entrypoints[input.entrypoint]?.storageContract;
         if(!contract) throw new Error('Unknown entrypoint');
-        if(asset.source.kind==='node') {
+        if(asset.source.kind==='node'||asset.source.kind==='historical-artifact') {
           const sourceRun=await this.one<SpaceRun>(db,'ws_runs',spaceId,asset.source.runId,'run_id');
           if(sourceRun.workflowVersionId!==input.workflowVersionId||sourceRun.entrypoint!==input.entrypoint) throw new Error('Decision workflow does not match asset production');
         }
@@ -670,25 +940,57 @@ export class WorkflowSpaceService {
     });
   }
   async recordReview(spaceId: string, input: ReviewDraft): Promise<Review> {
+    return this.recordReviewFromNode(spaceId,input);
+  }
+  private async recordReviewFromNode(spaceId:string,input:ReviewDraft,agentContextId?:string):Promise<Review> {
+    const savedResponse=input.responseTarget?await this.readSavedResponseTarget(spaceId,input.responseTarget):undefined;
     return this.tx(async db=> {
       await this.access(db,spaceId,writers,true); await this.lock(db,spaceId);
       const run = await this.one<SpaceRun>(db,'ws_runs',spaceId,input.runId,'run_id');
       for(const key of ['good','bad','improvement','unresolved'] as const) required(input.answers[key],`Review answer ${key}`);
       required(input.standard.id,'Standard ID'); required(input.standard.revision,'Standard revision'); required(input.standard.content,'Standard content');
-      if(!input.assetVersionIds.length) throw new Error('Review needs exact target versions');
+      if(!Array.isArray(input.assetVersionIds) || (input.responseTarget?input.assetVersionIds.length!==0:input.assetVersionIds.length===0))
+        throw new Error('Review needs exactly one target form: asset versions or saved response');
+      if(input.responseTarget?.runId!==undefined && input.responseTarget.runId!==input.runId) throw new Error('Saved response review run mismatch');
+      if(input.evidencePointers?.length && !savedResponse) throw new Error('Response evidence pointers require a saved response target');
+      for(const pointer of input.evidencePointers??[]) {
+        if(typeof pointer!=='string'||!pointerExists(savedResponse!.output,pointer)) throw new Error('Response evidence pointer does not exist');
+      }
       for(const id of input.assetVersionIds) {
         const asset = await this.asset(db,spaceId,id);
-        if(asset.source.kind!=='node'||asset.source.runId!==run.runId) throw new Error('Review target must be produced by reviewed run');
+        if((asset.source.kind!=='node'&&asset.source.kind!=='historical-artifact')||asset.source.runId!==run.runId)
+          throw new Error('Review target must be produced by reviewed run');
       }
       for(const id of input.evidence) await this.asset(db,spaceId,id);
       if(!['human','agent'].includes(input.judge.kind)) throw new Error('Unknown judge kind');
       if(input.judge.kind==='human') {
+        if(input.observationReceiptId)throw new Error('Human review cannot claim an Agent observation receipt');
         if(this.principal.kind!=='human'||input.judge.id!==this.principal.id) throw new Error('Human judge identity mismatch');
       } else {
         if(!input.judge.sessionId) throw new Error('Agent review requires an independent observed session');
+        if(input.responseTarget) {
+          if(!input.observationReceiptId)throw new Error('External Agent review requires an observation receipt');
+          const observer=await this.authenticatedExternalAgentWriter(spaceId,input.observationReceiptId,input.runId);
+          const receipt=await this.readExternalAgentObservation(spaceId,input.observationReceiptId);
+          if(receipt.delivery!=='saved-response-read'||input.judge.id!==observer.id||input.judge.sessionId!==observer.sessionId||
+            await hash(input.responseTarget)!==await hash(receipt.target))
+            throw new Error('External Agent review identity or observed target mismatch');
+        } else if(input.observationReceiptId) {
+          if(input.assetVersionIds.length!==1)throw new Error('External Agent asset review requires one exact asset version');
+          const observer=await this.authenticatedExternalAgentWriter(spaceId,input.observationReceiptId,input.runId);
+          const receipt=await this.readExternalAgentObservation(spaceId,input.observationReceiptId);
+          const asset=await this.asset(db,spaceId,input.assetVersionIds[0]!);
+          if(receipt.delivery!=='published-asset-read'||input.judge.id!==observer.id||input.judge.sessionId!==observer.sessionId||
+            receipt.target.assetVersionId!==asset.id||receipt.target.payloadHash!==asset.payloadHash||receipt.target.runId!==run.runId)
+            throw new Error('External Agent asset review identity or observed target mismatch');
+        } else {
+        if(input.observationReceiptId||this.principal.externalAgent)throw new Error('External Agent review requires the exact observed response target');
+        if(!agentContextId)throw new Error('Native Agent review requires the bound node capability');
         const session = await this.one<SessionRecord>(db,'ws_sessions',spaceId,input.judge.sessionId);
         if(session.role!==input.judge.id || session.completeness!=='complete') throw new Error('Agent judge role or completion mismatch');
         const judgeContexts=(await db.query<{document:NodeContext}>('SELECT document FROM ws_contexts WHERE space_id=$1 AND session_id=$2',[spaceId,session.id])).rows.map(r=>r.document);
+        if(!judgeContexts.some(context=>context.id===agentContextId&&context.nodeId===input.judge.id&&context.sessionId===session.id))
+          throw new Error('Native Agent review context mismatch');
         const completedAgentContexts=judgeContexts.filter(c=>c.producer==='agent');
         if(!completedAgentContexts.length) throw new Error('Agent review requires an observed Agent context');
         for(const context of completedAgentContexts) {
@@ -704,6 +1006,7 @@ export class WorkflowSpaceService {
             if(asset.source.sessionId===session.id || generated?.sessionId===session.id) throw new Error('Judge must be independent from producer');
           }
         }
+        }
       }
       if(input.baselineReviewId) {
         const baseline=await this.one<Review>(db,'ws_reviews',spaceId,input.baselineReviewId);
@@ -717,7 +1020,10 @@ export class WorkflowSpaceService {
         return prior.rows[0].document;
       }
       const value:Review = {...clone(input),spaceId,createdAt:now()};
-      await db.query('INSERT INTO ws_reviews(space_id,id,run_id,baseline_id,session_id,document) VALUES($1,$2,$3,$4,$5,$6::jsonb)',[spaceId,input.id,input.runId,input.baselineReviewId??null,input.judge.sessionId??null,json(value)]);
+      // External Codex sessions are authenticated by an immutable observation asset,
+      // not a fabricated native ws_sessions row. The document retains the exact ID.
+      const nativeSessionId=input.judge.kind==='agent'&&!input.observationReceiptId?input.judge.sessionId:null;
+      await db.query('INSERT INTO ws_reviews(space_id,id,run_id,baseline_id,session_id,document) VALUES($1,$2,$3,$4,$5,$6::jsonb)',[spaceId,input.id,input.runId,input.baselineReviewId??null,nativeSessionId??null,json(value)]);
       for(const id of new Set([...input.assetVersionIds,...input.evidence])) await db.query('INSERT INTO ws_review_assets(space_id,review_id,version_id) VALUES($1,$2,$3)',[spaceId,input.id,id]);
       return value;
     });
@@ -1136,7 +1442,7 @@ export class WorkflowSpaceService {
   async runtimeLedger(spaceId:string):Promise<PostgresWorkflowRunStore> {
     await this.access(this.pool,spaceId,writers,true); return this.ledger(spaceId);
   }
-  async runtimeEvidence(spaceId:string):Promise<Pick<PostgresWorkflowRunStore,'getRun'|'getArtifact'|'listArtifacts'|'listSteps'|'listEvents'|'listAttempts'>> {
+  async runtimeEvidence(spaceId:string):Promise<Pick<PostgresWorkflowRunStore,'getRun'|'getArtifact'|'getArtifactPayload'|'listArtifacts'|'listSteps'|'listEvents'|'listAttempts'>> {
     await this.access(this.pool,spaceId);
     const ledger=this.ledger(spaceId);
     const checkRun=async (runId:string):Promise<void> => {
@@ -1156,6 +1462,13 @@ export class WorkflowSpaceService {
         const artifact=await ledger.getArtifact(id);
         if (artifact) await checkRun(artifact.producedBy.workflowRunId);
         return artifact;
+      },
+      getArtifactPayload:async id=>{
+        await this.access(this.pool,spaceId);
+        const artifact=await ledger.getArtifact(id);
+        if(!artifact) return undefined;
+        await checkRun(artifact.producedBy.workflowRunId);
+        return ledger.getArtifactPayload(id);
       },
       listArtifacts:async runId=>{await checkRun(runId);return ledger.listArtifacts(runId);},
       listSteps:async runId=>{await checkRun(runId);return ledger.listSteps(runId);},
@@ -1596,6 +1909,22 @@ export class WorkflowSpaceService {
   async readRun(spaceId:string,runId:string):Promise<SpaceRun> {
     await this.access(this.pool,spaceId);return this.one(this.pool,'ws_runs',spaceId,runId,'run_id');
   }
+  /** Source identity for a human-authored annotation; browser payloads cannot choose this author. */
+  async authenticatedHumanWriter(spaceId:string):Promise<{id:string;kind:'human'}> {
+    await this.access(this.pool,spaceId,writers,true);
+    if(this.principal.kind!=='human')throw new Error('Human author required');
+    return {id:this.principal.id,kind:'human'};
+  }
+  async authenticatedExternalAgentWriter(spaceId:string,receiptId:string,runId:string):Promise<ExternalAgentObservationReceipt['observer']> {
+    await this.access(this.pool,spaceId,writers,true);
+    const agent=this.principal.externalAgent;
+    if(this.principal.kind!=='service'||!agent)throw new Error('External Agent observer credential required');
+    const receipt=await this.readExternalAgentObservation(spaceId,receiptId);
+    if(receipt.observer.id!==agent.id||receipt.observer.sessionId!==agent.sessionId||
+      receipt.observer.servicePrincipalId!==this.principal.id||receipt.target.runId!==runId)
+      throw new Error('External Agent observation credential or run mismatch');
+    return clone(receipt.observer);
+  }
   async readWorkflowVersion(spaceId:string,id:string):Promise<WorkflowVersion> {
     await this.access(this.pool,spaceId);return this.one(this.pool,'ws_workflows',spaceId,id);
   }
@@ -1605,29 +1934,208 @@ export class WorkflowSpaceService {
   async readReview(spaceId:string,id:string):Promise<Review> {
     await this.access(this.pool,spaceId);return this.one(this.pool,'ws_reviews',spaceId,id);
   }
+  async reviewsForRun(spaceId:string,runId:string):Promise<Review[]> {
+    await this.readRun(spaceId,runId);
+    const rows=await this.pool.query<{document:Review}>(
+      'SELECT document FROM ws_reviews WHERE space_id=$1 AND run_id=$2 ORDER BY id',[spaceId,runId]);
+    return rows.rows.map(row=>row.document);
+  }
+  /** Verifies an exact, failed and unpublished observed Agent reply before it is used as evidence. */
+  async readSavedResponseTarget(spaceId:string,target:SavedResponseTarget):Promise<{target:SavedResponseTarget;output:unknown}> {
+    await this.access(this.pool,spaceId);
+    for(const key of ['runId','occurrenceId','stepRunId','attemptId','sessionId','eventId','outputHash'] as const)
+      if(typeof target?.[key]!=='string'||!target[key].trim()) throw new Error(`Saved response ${key} is required`);
+    if(!Number.isSafeInteger(target.eventSeq)||target.eventSeq<1) throw new Error('Saved response event sequence is invalid');
+    const view=await this.process(spaceId,target.runId);
+    const occurrence=view.occurrences.find(item=>item.id===target.occurrenceId);
+    if(!occurrence || !occurrence.stepRunIds.includes(target.stepRunId) || !occurrence.attemptIds.includes(target.attemptId))
+      throw new Error('Saved response occurrence, step or attempt mismatch');
+    const native=await this.ledger(spaceId).getRun(target.runId);
+    if(native?.state!=='failed'||occurrence.state!=='failed'||occurrence.outputBindings.length)
+      throw new Error('Saved response target must be failed and unpublished');
+    const contextRows=await this.pool.query<{id:string;document:NodeContext}>(
+      'SELECT id,document FROM ws_contexts WHERE space_id=$1 AND run_id=$2 AND step_run_id=$3 AND attempt_id=$4 AND session_id=$5',
+      [spaceId,target.runId,target.stepRunId,target.attemptId,target.sessionId]);
+    const eventRows=await this.pool.query<{context_id:string;dedup_key:string;document:SessionEvent}>(
+      'SELECT context_id,dedup_key,document FROM ws_session_events WHERE space_id=$1 AND id=$2 AND session_id=$3 AND seq=$4',
+      [spaceId,target.eventId,target.sessionId,target.eventSeq]);
+    const event=eventRows.rows[0];
+    const context=contextRows.rows.map(row=>row.document).find(item=>item.id===event?.context_id && item.producer==='agent' &&
+      item.runId===target.runId && item.stepRunId===target.stepRunId && item.attemptId===target.attemptId &&
+      item.sessionId===target.sessionId && occurrence.contextIds.includes(item.id));
+    if(!context) throw new Error('Saved response Agent context mismatch');
+    if(!event || event.dedup_key!=='agent-result' ||
+      event.document.id!==target.eventId || event.document.seq!==target.eventSeq ||
+      event.document.sessionId!==target.sessionId || event.document.attemptId!==target.attemptId || event.document.kind!=='message')
+      throw new Error('Saved response event mismatch');
+    const body=event.document.body as {role?:unknown;output?:unknown}|null;
+    if(!body || body.role!=='assistant' || !Object.hasOwn(body,'output')) throw new Error('Saved response assistant output missing');
+    if(await hash(body.output)!==target.outputHash) throw new Error('Saved response output hash mismatch');
+    return {target:clone(target),output:clone(body.output)};
+  }
+  /** Exact run-scoped trace reference; a session name alone cannot claim an unrelated run. */
+  async readRunTraceReference(spaceId:string,runId:string,sessionId:string,eventId?:string,eventSeq?:number):Promise<{
+    context:NodeContext;event?:SessionEvent
+  }> {
+    await this.readRun(spaceId,runId);
+    required(sessionId,'Trace session ID');
+    if((eventId===undefined)!==(eventSeq===undefined))throw new Error('Trace event ID and sequence must be supplied together');
+    const contexts=(await this.pool.query<{document:NodeContext}>(
+      'SELECT document FROM ws_contexts WHERE space_id=$1 AND run_id=$2 AND session_id=$3 ORDER BY id',
+      [spaceId,runId,sessionId])).rows.map(row=>row.document);
+    if(!contexts.length)throw new Error('Trace session is outside the run');
+    if(eventId===undefined)return {context:contexts[0]!};
+    required(eventId,'Trace event ID');
+    if(eventSeq===undefined||!Number.isSafeInteger(eventSeq)||eventSeq<1)throw new Error('Trace event sequence is invalid');
+    const row=(await this.pool.query<{context_id:string;document:SessionEvent}>(
+      'SELECT context_id,document FROM ws_session_events WHERE space_id=$1 AND id=$2 AND session_id=$3 AND seq=$4',
+      [spaceId,eventId,sessionId,eventSeq])).rows[0];
+    const context=contexts.find(item=>item.id===row?.context_id);
+    if(!row||!context||row.document.id!==eventId||row.document.seq!==eventSeq||
+      row.document.sessionId!==sessionId||row.document.attemptId!==context.attemptId)
+      throw new Error('Trace event is outside the exact run or session');
+    return {context,event:row.document};
+  }
+  /** Resolves a saved node output or an exact, explicitly labeled historical ledger artifact. */
+  async readPublishedAssetTarget(spaceId:string,target:PublishedAssetTarget):Promise<{
+    asset:AssetVersion & {state:string};source:Extract<AssetSource,{kind:'node'|'historical-artifact'}>;producerNativeSessionIds:string[]
+  }> {
+    for(const key of ['runId','assetVersionId','payloadHash'] as const)
+      if(typeof target?.[key]!=='string'||!target[key].trim())throw new Error(`Published asset ${key} is required`);
+    await this.readRun(spaceId,target.runId);
+    const asset=await this.readAsset(spaceId,target.assetVersionId);
+    if(asset.payloadHash!==target.payloadHash)throw new Error('Published asset payload hash mismatch');
+    if((asset.source.kind!=='node'&&asset.source.kind!=='historical-artifact')||asset.source.runId!==target.runId)
+      throw new Error('Published asset must have exact run provenance');
+    const source=asset.source;
+    if(source.kind==='historical-artifact'){
+      const binding=await this.readRun(spaceId,target.runId);
+      if(binding.executionMode!=='imported'||binding.historicalSource?.workspaceId!==source.sourceWorkspaceId)
+        throw new Error('Historical asset source does not match imported run');
+      const artifact=await this.ledger(spaceId).getArtifact(source.artifactId);
+      const mapped=await this.pool.query<{version_id:string}>(
+        'SELECT version_id FROM ws_runtime_artifacts WHERE space_id=$1 AND artifact_id=$2',[spaceId,source.artifactId]);
+      if(!artifact||mapped.rows[0]?.version_id!==asset.id||artifact.producedBy.workflowRunId!==source.runId||
+        artifact.producedBy.stepRunId!==source.stepRunId||artifact.producedBy.attemptId!==source.attemptId||
+        artifact.sha256!==source.originalSha256||artifact.uri!==source.originalUri||
+        await hash(await this.ledger(spaceId).getArtifactPayload(source.artifactId))!==asset.payloadHash)
+        throw new Error('Historical asset publication provenance mismatch');
+      return {asset,source:clone(source),producerNativeSessionIds:[]};
+    }
+    const context=await this.one<NodeContext>(this.pool,'ws_contexts',spaceId,source.contextId);
+    if(context.runId!==source.runId||context.stepRunId!==source.stepRunId||context.attemptId!==source.attemptId||
+      context.nodeId!==source.nodeId||context.sessionId!==source.sessionId||context.producer!==source.producer||
+      context.generatedByContextId!==source.generatedByContextId)
+      throw new Error('Published asset producer context mismatch');
+    const bound=await this.pool.query<{version_id:string}>(
+      'SELECT version_id FROM ws_output_bindings WHERE space_id=$1 AND context_id=$2 AND version_id=$3',
+      [spaceId,context.id,asset.id]);
+    if(!bound.rows.length)throw new Error('Published asset has no exact node output binding');
+    const contexts=[context];
+    if(source.generatedByContextId) {
+      const origin=await this.one<NodeContext>(this.pool,'ws_contexts',spaceId,source.generatedByContextId);
+      if(origin.runId!==target.runId)throw new Error('Published asset origin run mismatch');
+      contexts.push(origin);
+    }
+    const nativeIds=new Set<string>();
+    for(const producer of contexts) {
+      const session=await this.one<SessionRecord>(this.pool,'ws_sessions',spaceId,producer.sessionId);
+      if(session.nativeSessionId)nativeIds.add(session.nativeSessionId);
+    }
+    return {asset,source:clone(source),producerNativeSessionIds:[...nativeIds].sort()};
+  }
+  /** An authenticated external Agent reads one exact saved reply; the receipt proves delivery, not understanding. */
+  async observeSavedResponseTarget(spaceId:string,target:SavedResponseTarget):Promise<{receipt:ExternalAgentObservationReceipt;output:unknown}> {
+    await this.access(this.pool,spaceId,writers,true);
+    const agent=this.principal.externalAgent;
+    if(this.principal.kind!=='service'||!agent)throw new Error('External Agent observer credential required');
+    const saved=await this.readSavedResponseTarget(spaceId,target);
+    const producer=await this.one<SessionRecord>(this.pool,'ws_sessions',spaceId,target.sessionId);
+    if(agent.sessionId===target.sessionId||agent.sessionId===producer.nativeSessionId)
+      throw new Error('Agent observer must be independent from producer');
+    const payload={target:clone(target),observer:{id:agent.id,sessionId:agent.sessionId,servicePrincipalId:this.principal.id},
+      ...(producer.nativeSessionId?{producerNativeSessionId:producer.nativeSessionId}:{}),delivery:'saved-response-read' as const};
+    const version=await this.importAsset(spaceId,{assetId:externalAgentObservationAssetId(agent.sessionId,target.eventId),
+      schema:EXTERNAL_AGENT_OBSERVATION_SCHEMA_REF,payload,description:'External Agent read of exact saved response',
+      idempotencyKey:`external-agent-observation:${agent.sessionId}:${target.eventId}`});
+    return {receipt:externalAgentObservationReceipt(version),output:saved.output};
+  }
+  /** An authenticated external Agent receives the exact published node asset. */
+  async observePublishedAsset(spaceId:string,target:PublishedAssetTarget):Promise<{
+    receipt:ExternalAgentAssetObservationReceipt;asset:AssetVersion & {state:string}
+  }> {
+    await this.access(this.pool,spaceId,writers,true);
+    const agent=this.principal.externalAgent;
+    if(this.principal.kind!=='service'||!agent)throw new Error('External Agent observer credential required');
+    const observed=await this.readPublishedAssetTarget(spaceId,target);
+    if(observed.source.kind==='node'&&agent.sessionId===observed.source.sessionId||observed.producerNativeSessionIds.includes(agent.sessionId))
+      throw new Error('Agent observer must be independent from producer');
+    if(observed.source.kind==='node'&&observed.source.generatedByContextId) {
+      const origin=await this.one<NodeContext>(this.pool,'ws_contexts',spaceId,observed.source.generatedByContextId);
+      if(agent.sessionId===origin.sessionId)throw new Error('Agent observer must be independent from producer');
+    }
+    const payload={target:clone(target),source:clone(observed.source),observer:{id:agent.id,sessionId:agent.sessionId,servicePrincipalId:this.principal.id},
+      producerNativeSessionIds:observed.producerNativeSessionIds,delivery:'published-asset-read' as const};
+    const version=await this.importAsset(spaceId,{assetId:externalAgentAssetObservationAssetId(agent.sessionId,target.assetVersionId),
+      schema:observed.source.kind==='historical-artifact'?EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF:EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF,
+      payload,dependencies:[target.assetVersionId],
+      description:'External Agent read of exact published asset',
+      idempotencyKey:`external-agent-observation:asset:${agent.sessionId}:${target.assetVersionId}`});
+    return {receipt:externalAgentAssetObservationReceipt(version),asset:observed.asset};
+  }
+  async readExternalAgentObservation(spaceId:string,receiptId:string):Promise<AnyExternalAgentObservationReceipt> {
+    const version=await this.readAsset(spaceId,receiptId);
+    if(version.schema.namespace===EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF.namespace&&
+      (version.schema.revision===EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF.revision||
+       version.schema.revision===EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF.revision)) {
+      const receipt=externalAgentAssetObservationReceipt(version);
+      const observed=await this.readPublishedAssetTarget(spaceId,receipt.target);
+      if(await hash(receipt.source)!==await hash(observed.source)||
+        await hash(receipt.producerNativeSessionIds)!==await hash(observed.producerNativeSessionIds)||
+        receipt.source.kind==='node'&&receipt.observer.sessionId===receipt.source.sessionId||
+        observed.producerNativeSessionIds.includes(receipt.observer.sessionId))
+        throw new Error('Published asset observation producer or target mismatch');
+      if(receipt.source.kind==='node'&&receipt.source.generatedByContextId) {
+        const origin=await this.one<NodeContext>(this.pool,'ws_contexts',spaceId,receipt.source.generatedByContextId);
+        if(receipt.observer.sessionId===origin.sessionId)throw new Error('Agent observer must be independent from producer');
+      }
+      return receipt;
+    }
+    const receipt=externalAgentObservationReceipt(version);
+    await this.readSavedResponseTarget(spaceId,receipt.target);
+    const producer=await this.one<SessionRecord>(this.pool,'ws_sessions',spaceId,receipt.target.sessionId);
+    if(receipt.observer.sessionId===receipt.target.sessionId||receipt.observer.sessionId===producer.nativeSessionId||
+      receipt.producerNativeSessionId!==producer.nativeSessionId)
+      throw new Error('Agent observer must be independent from producer');
+    return receipt;
+  }
   /** Small authenticated overview for polling; reads no asset payloads or history documents. */
-  async spaceSummary(spaceId:string,scope:{workflowId:string;entrypoint:string;adoptionSlot?:string}):Promise<{
+  async spaceSummary(spaceId:string,scope:{workflowId:string;entrypoint:string;adoptionSlot?:string;auxiliaryWorkflowIds?:readonly string[]}):Promise<{
     space:WorkflowSpace;versionCount:number;caseCount:number;runCount:number;assetCount:number;latestVersionId:string|null;adoptedVersionId:string|null
   }> {
     const space=await this.access(this.pool,spaceId);
     required(scope.workflowId,'Workflow ID');required(scope.entrypoint,'Entrypoint');
+    const readableIds=[...new Set([scope.workflowId,...(scope.auxiliaryWorkflowIds??[]).filter(Boolean)])];
     const result=await this.pool.query<{version_count:number;case_count:number;run_count:number;asset_count:number;latest_version_id:string|null;adopted_version_id:string|null}>(
-      `WITH scoped_versions AS (
+      `WITH primary_versions AS (
          SELECT id,document->>'createdAt' AS created_at FROM ws_workflows
          WHERE space_id=$1 AND archival IS NULL AND document->'entrypoints'->$2->>'workflowId'=$3
+       ), readable_versions AS (
+         SELECT id FROM ws_workflows
+         WHERE space_id=$1 AND archival IS NULL AND document->'entrypoints'->$2->>'workflowId'=ANY($5::text[])
        )
        SELECT
-         (SELECT count(*)::int FROM scoped_versions) AS version_count,
+         (SELECT count(*)::int FROM readable_versions) AS version_count,
          (SELECT count(*)::int FROM ws_cases WHERE space_id=$1) AS case_count,
-         (SELECT count(*)::int FROM ws_runs r JOIN scoped_versions v ON v.id=r.workflow_version_id
+         (SELECT count(*)::int FROM ws_runs r JOIN readable_versions v ON v.id=r.workflow_version_id
            WHERE r.space_id=$1 AND r.document->>'entrypoint'=$2) AS run_count,
          (SELECT count(*)::int FROM ws_asset_versions WHERE space_id=$1) AS asset_count,
-         (SELECT id FROM scoped_versions ORDER BY created_at DESC,id DESC LIMIT 1) AS latest_version_id,
+         (SELECT id FROM primary_versions ORDER BY created_at DESC,id DESC LIMIT 1) AS latest_version_id,
          (SELECT a.target_workflow_id FROM ws_adoption_heads h
            JOIN ws_adoptions a ON a.space_id=h.space_id AND a.id=h.adoption_id
-           JOIN scoped_versions v ON v.id=a.target_workflow_id
+           JOIN primary_versions v ON v.id=a.target_workflow_id
            WHERE h.space_id=$1 AND h.slot=$4::text) AS adopted_version_id`,
-      [spaceId,scope.entrypoint,scope.workflowId,scope.adoptionSlot??null]);
+      [spaceId,scope.entrypoint,scope.workflowId,scope.adoptionSlot??null,readableIds]);
     const row=result.rows[0]!;
     return {space,versionCount:row.version_count,caseCount:row.case_count,runCount:row.run_count,assetCount:row.asset_count,
       latestVersionId:row.latest_version_id,adoptedVersionId:row.adopted_version_id};
@@ -1641,17 +2149,19 @@ export class WorkflowSpaceService {
        AND ($3::text IS NULL OR id COLLATE "C" > $3::text COLLATE "C")
        ORDER BY id COLLATE "C" LIMIT $4`,[spaceId,versionId,after??null,limit])).rows.map(row=>row.document);
   }
-  async caseRunsPage(spaceId:string,caseId:string,workflowId:string,entrypoint:string,after:string|undefined,limit:number):Promise<SpaceRun[]> {
+  async caseRunsPage(spaceId:string,caseId:string,workflowId:string|readonly string[],entrypoint:string,after:string|undefined,limit:number):Promise<SpaceRun[]> {
     await this.access(this.pool,spaceId);
     await this.one<SpaceCase>(this.pool,'ws_cases',spaceId,caseId);
     if(!Number.isSafeInteger(limit)||limit<1||limit>101)throw new Error('Invalid case run page size');
+    const workflowIds=typeof workflowId==='string'?[workflowId]:[...new Set(workflowId)];
+    if(!workflowIds.length||workflowIds.some(id=>!id))throw new Error('Invalid case run workflow scope');
     return (await this.pool.query<{document:SpaceRun}>(
       `SELECT r.document FROM ws_runs r JOIN ws_workflows v ON v.space_id=r.space_id AND v.id=r.workflow_version_id
        WHERE r.space_id=$1 AND r.case_id=$2 AND r.document->>'entrypoint'=$4
-         AND v.document->'entrypoints'->$4->>'workflowId'=$3
+         AND v.document->'entrypoints'->$4->>'workflowId'=ANY($3::text[])
          AND ($5::text IS NULL OR r.run_id COLLATE "C" > $5::text COLLATE "C")
        ORDER BY r.run_id COLLATE "C" LIMIT $6`,
-      [spaceId,caseId,workflowId,entrypoint,after??null,limit])).rows.map(row=>row.document);
+      [spaceId,caseId,workflowIds,entrypoint,after??null,limit])).rows.map(row=>row.document);
   }
   async versionRunStats(spaceId:string,versionId:string,entrypoint:string,workflowId:string):Promise<{runCount:number;caseCount:number}> {
     await this.access(this.pool,spaceId);

@@ -40,6 +40,25 @@ describe('process projection',()=>{
     expect(project([step('write','succeeded')]).occurrences[0]?.state).toBe('needs_review');
   });
 
+  it('derives terminal failure from the exact failed ancestor phase without rewriting saved child steps',()=>{
+    const phase={...step('draft-phase','failed','phase'),key:'content-draft-0',phasePath:['content-draft-0'],error:'citation unresolved'};
+    const author={...step('author','succeeded'),key:'content-draft-0:write',phasePath:['content-draft-0']};
+    const publish={...step('publish','running','publish'),key:'content-draft-0:draft',phasePath:['content-draft-0']};
+    const other={...step('other','running'),key:'content-research-0:write',phasePath:['content-research-0']};
+    const events=[{id:'failure',runId:'run',seq:1,type:'workflow.failed',timestamp:'2026-01-01T00:00:00Z'}];
+    const view=projectProcess({run,contract,contractSource:'method',steps:[phase,author,publish,other],attempts:[],contexts:[context('author')],outputs:[],assets:[],relations:[],events});
+    const selected=view.occurrences.find(value=>value.id==='author')!;
+    expect(selected.state).toBe('failed');
+    expect(selected.terminalFailure).toEqual({state:'failed',provenance:'derived',failedAncestorStepId:'draft-phase',failedAncestorStepKey:'content-draft-0',error:'citation unresolved'});
+    expect(selected.technicalSteps).toEqual([{id:'author',key:'content-draft-0:write',kind:'agent',state:'succeeded'}]);
+    expect(view.occurrences.find(value=>value.id==='publish')?.technicalSteps[0]?.state).toBe('running');
+    expect(view.occurrences.find(value=>value.id==='other')?.terminalFailure).toBeUndefined();
+    const live=projectProcess({run,contract,contractSource:'method',steps:[phase,author,publish],attempts:[],contexts:[context('author')],outputs:[],assets:[],relations:[]});
+    expect(live.occurrences.find(value=>value.id==='author')?.terminalFailure).toBeUndefined();
+    const recovered=projectProcess({run,contract,contractSource:'method',steps:[phase,author,publish],attempts:[],contexts:[context('author')],outputs:[],assets:[],relations:[],events:[...events,{id:'completion',runId:'run',seq:2,type:'workflow.completed',timestamp:'2026-01-01T00:00:01Z'}]});
+    expect(recovered.occurrences.find(value=>value.id==='author')?.terminalFailure).toBeUndefined();
+  });
+
   it('requires every declared output and a succeeded producing context before recovering',()=>{
     const twoOutputs={...contract,nodes:contract.nodes.map(node=>node.id==='author'?{
       ...node,outputs:{draft:{slot:'draft',min:1},summary:{slot:'summary',min:1}}

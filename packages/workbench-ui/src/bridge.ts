@@ -13,7 +13,12 @@ export function selectedGraphNode(event: MessageEvent, frameWindow: Window | nul
 }
 
 export function focusGraphNode(frameWindow: Window | null, nodeId: string | undefined, allowedIds: ReadonlySet<string>): void {
-  if (frameWindow && nodeId && allowedIds.has(nodeId)) frameWindow.postMessage({ type: 'space-node-focus', nodeId }, '*');
+  if (!frameWindow) return;
+  if (nodeId === undefined) {
+    frameWindow.postMessage({ type: 'space-node-focus', nodeId: null }, '*');
+  } else if (allowedIds.has(nodeId)) {
+    frameWindow.postMessage({ type: 'space-node-focus', nodeId }, '*');
+  }
 }
 
 export function isGraphReady(event: MessageEvent, frameWindow: Window | null, identity: GraphIdentity | undefined): boolean {

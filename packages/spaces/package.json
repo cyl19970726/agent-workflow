@@ -24,6 +24,7 @@
     "build": "tsc -p tsconfig.json && node copy-viewer-assets.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1149.0",
     "@signal-room/workflow": "0.1.0",
     "@signal-room/workflow-postgres": "0.1.0",
     "@signal-room/workflow-space-contracts": "0.1.0",
@@ -31,5 +32,8 @@
   },
   "devDependencies": {
     "@types/pg": "8.23.1"
+  },
+  "bin": {
+    "workflow-space-operator": "./dist/operator-cli.js"
   }
 }

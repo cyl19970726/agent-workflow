@@ -1,4 +1,5 @@
 import type { WorkflowSpaceService } from './service.js';
+import {isRunAssetSource} from './types.js';
 
 export type SpaceInspection =
   | { kind: 'summary' }
@@ -44,7 +45,7 @@ export async function inspectSpace(service: WorkflowSpaceService, spaceId: strin
   return {
     binding, record: await ledger.getRun(query.runId), inputManifest: await service.readManifest(spaceId, binding.inputManifestId),
     steps: await ledger.listSteps(query.runId), contexts: await service.runtimeContexts(spaceId, query.runId),
-    assets: overview.assets.filter(asset => asset.source.kind === 'node' && asset.source.runId === query.runId),
+    assets: overview.assets.filter(asset => isRunAssetSource(asset.source) && asset.source.runId === query.runId),
     reviews: overview.reviews.filter(review => review.runId === query.runId),
   };
 }

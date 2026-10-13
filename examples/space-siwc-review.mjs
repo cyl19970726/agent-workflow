@@ -5,7 +5,7 @@ import { JSON_SCHEMA_DIALECT } from '../packages/space-contracts/dist/index.js';
 import {
   WorkflowSpaceService, PostgresBlobStore, migrateWorkflowSpaces, createSpaceRuntime, nodeReadTools,
 } from '../packages/spaces/dist/index.js';
-import { SiwcAuth, SiwcResponsesRunner } from '../packages/agent-sdk/dist/index.js';
+import { SiwcAuth, OpenAIAgentsSdkRunner } from '../packages/agent-sdk/dist/index.js';
 
 // Opt-in live storage and independent-evaluation probe. Never part of offline examples.
 const { WORKFLOW_DATABASE_URL, WORKFLOW_SIWC_MODEL, WORKFLOW_PROBE_SPACE_ID, WORKFLOW_PROBE_RUN_ID } = process.env;
@@ -107,7 +107,7 @@ try {
     source: source.id, candidate: candidate.id,
   });
 
-  const runner = new SiwcResponsesRunner({
+  const runner = new OpenAIAgentsSdkRunner({
     auth: new SiwcAuth(), maxTurns: 3, maxToolCalls: 2,
     tools: async (request) => {
       const context = (await service.runtimeContexts(spaceId, request.runId))

@@ -3,6 +3,7 @@ import { assetReading, assetCard, caseCard, overviewBody, caseBody, iterationsBo
 import type { PostgresWorkflowRunStore } from '@signal-room/workflow-postgres';
 import type { WorkflowPresentation, ResolvedPresentation } from './presentation.js';
 import type { AssetVersion, NodeContext, SessionEvent, SpaceOverview, WorkflowSpace } from './types.js';
+import {isRunAssetSource} from './types.js';
 import { resolveWorkbenchRun, compareWorkbenchAssets, getAssetSources, getSpaceWorkbench, type BusinessPresentationAdapter, type WorkbenchRun } from './workbench-model.js';
 import { processReadingBody, type ProcessSelection } from './process-render.js';
 import type { ProcessView } from './process-projection.js';
@@ -102,7 +103,7 @@ function renderSpaces(spaces: WorkflowSpace[]): string {
 
 async function readingOptions(service:SpaceConsoleService,data:SpaceOverview,asset:AssetVersion,options:SpaceConsoleOptions,viewBindingId?:string|null):Promise<ReadingOptions> {
   const source=asset.source;
-  const run=source.kind==='node'?data.runs.find(run=>run.runId===source.runId):undefined;
+  const run=isRunAssetSource(source)?data.runs.find(run=>run.runId===source.runId):undefined;
   const resolved=run&&service.resolvePresentation?await service.resolvePresentation(data.space.id,run.workflowVersionId,run.entrypoint):null;
   let presentation=resolved?.presentation;
   if(viewBindingId) {
@@ -116,7 +117,7 @@ async function readingOptions(service:SpaceConsoleService,data:SpaceOverview,ass
 }
 function renderAsset(spaceId:string,asset:AssetVersion&{state:string},reading:ReadingOptions,data:SpaceOverview,selectedRun?:SpaceOverview["runs"][number],final=false,returnHref?:string,process?:ProcessView):string {
   const view=assetReading(asset,reading),source=asset.source;
-  const run=selectedRun??(source.kind==='node'?data.runs.find(run=>run.runId===source.runId):undefined);
+  const run=selectedRun??(isRunAssetSource(source)?data.runs.find(run=>run.runId===source.runId):undefined);
   const item=run?data.cases.find(item=>item.id===run.caseId):undefined;
   const dependencies=asset.dependencies.filter(versionId=>data.assets.some(value=>value.id===versionId));
   const sourceHref=(value:NonNullable<ReadingOptions['sources']>[number])=>`${assetPath(spaceId,value.assetVersionId!)}?${run?`run=${id(run.runId)}&amp;`:''}${value.pointer?`pointer=${id(value.pointer)}&amp;`:''}backAsset=${id(asset.id)}${process?.occurrences.find(item=>Object.values(item.outputs).flat().includes(asset.id))?.round?`&amp;backRound=${process.occurrences.find(item=>Object.values(item.outputs).flat().includes(asset.id))!.round}`:''}${value.pointer?`#${fragmentAnchor(value.pointer)}`:''}`;
@@ -131,7 +132,7 @@ function renderAsset(spaceId:string,asset:AssetVersion&{state:string},reading:Re
   ${section('谁使用了它',data.assets.filter(value=>value.dependencies.includes(asset.id)).map(relatedCard))}
   ${section('附件',asset.attachments.map(blob=>`<p><a href="${blobPath(spaceId,blob.id)}">${escape(blob.mediaType)} · ${escape(blob.id)}</a></p>`))}
   <details><summary>版本与来源</summary><p>不可变资产版本 ${escape(asset.version)} · ${escape(asset.createdAt)}</p><p>Schema ${escape(asset.schema.namespace)}@${escape(asset.schema.revision)} · version ID ${escape(asset.id)} · Logical asset ${escape(asset.assetId)}</p>
-  ${source.kind==='node'?`<p><a href="${contextPath(spaceId,source.contextId)}">生产上下文</a> · <a href="${sessionPath(spaceId,source.sessionId)}">执行记录</a>${source.generatedByContextId?` · <a href="${contextPath(spaceId,source.generatedByContextId)}">原始 Agent 上下文</a>`:''}</p>`:''}
+  ${source.kind==='node'?`<p><a href="${contextPath(spaceId,source.contextId)}">生产上下文</a> · <a href="${sessionPath(spaceId,source.sessionId)}">执行记录</a>${source.generatedByContextId?` · <a href="${contextPath(spaceId,source.generatedByContextId)}">原始 Agent 上下文</a>`:''}</p>`:source.kind==='historical-artifact'?`<p>历史证据 · 原工作区 ${escape(source.sourceWorkspaceId)} · 原资产 ${escape(source.artifactId)} · SHA-256 ${escape(source.originalSha256)}</p>`:''}
   ${dependencies.length?`<h3>准确依赖版本</h3><ul>${dependencies.map(versionId=>`<li><a href="${assetPath(spaceId,versionId)}">${escape(versionId)}</a></li>`).join('')}</ul>`:''}${block({source:asset.source,schema:asset.schema,payloadHash:asset.payloadHash,runId:run?.runId})}<details><summary>原始结构数据</summary>${block(asset.payload)}</details>${reading.presentation?`<p>兼容展示视图 ${escape(reading.presentation.id)}@${escape(reading.presentation.revision)}；运行未记录当时视图，当前使用独立兼容绑定。</p>${reading.presentationHistory?.length?`<h3>展示绑定历史</h3><ul>${reading.presentationHistory.map(binding=>`<li><a href="${assetPath(spaceId,asset.id)}?${run?`run=${id(run.runId)}&amp;`:''}viewBinding=${id(binding.id)}">视图 ${escape(binding.presentationRevision)}</a> · ${escape(binding.createdAt)} · ${escape(binding.actorId)}</li>`).join('')}</ul>`:''}`:''}</details>`;
 }
 
@@ -283,11 +284,11 @@ async function handle(request: IncomingMessage, response: ServerResponse,
       const reading=await readingOptions(service,data,asset,settings,url.searchParams.get('viewBinding'));
       const requestedRun=url.searchParams.get('run');
       const source=asset.source;
-      const runId=requestedRun??(source.kind==='node'?source.runId:undefined);
+      const runId=requestedRun??(isRunAssetSource(source)?source.runId:undefined);
       const contextRun=runId?data.runs.find(value=>value.runId===runId):undefined;
       if(runId&&!contextRun)throw new Error('Invalid query: asset context run');
-      if(contextRun&&!(source.kind==='node'&&source.runId===contextRun.runId)) {
-        const dependencies=new Set(data.assets.filter(value=>value.source.kind==='node'&&value.source.runId===contextRun.runId).flatMap(value=>value.dependencies));
+      if(contextRun&&!(isRunAssetSource(source)&&source.runId===contextRun.runId)) {
+        const dependencies=new Set(data.assets.filter(value=>isRunAssetSource(value.source)&&value.source.runId===contextRun.runId).flatMap(value=>value.dependencies));
         const contexts=await service.runtimeContexts?.(spaceId,contextRun.runId)??[];
         for(const context of contexts)for(const input of Object.values(context.inputs))dependencies.add(input.assetVersionId);
         if(!dependencies.has(asset.id))throw new Error('Invalid query: asset is outside requested run dependencies');
@@ -321,7 +322,7 @@ async function handle(request: IncomingMessage, response: ServerResponse,
       const [left,right]=await Promise.all([service.readAsset(spaceId,queryId(url,'left')),service.readAsset(spaceId,queryId(url,'right'))]);
       const data=await service.overview(spaceId),mode=url.searchParams.get('mode');
       if(mode&&!['auto','within-run','between-runs'].includes(mode)) throw new Error('Invalid query');
-      const comparison=left.source.kind==='node'&&right.source.kind==='node'?compareWorkbenchAssets(data,left.id,right.id,mode==='within-run'||mode==='between-runs'?mode:undefined):undefined;
+      const comparison=isRunAssetSource(left.source)&&isRunAssetSource(right.source)?compareWorkbenchAssets(data,left.id,right.id,mode==='within-run'||mode==='between-runs'?mode:undefined):undefined;
       if(!comparison&&mode&&mode!=='auto') throw new Error('Invalid query: comparison requires runs');
       const [leftOptions,rightOptions]=await Promise.all([readingOptions(service,data,left,settings),readingOptions(service,data,right,settings)]);
       if(comparison&&service.process) {

@@ -56,7 +56,7 @@ function Form({ api, scope, versionId, versionLabel, versionPurpose, versionPurp
   </form></div>;
 }
 
-function Preparation({ api, scope, caseId, csrfToken, onRun, onAsset }: { api: SpaceApi; scope: string; caseId: string; csrfToken?: string | null; onRun: (run: RunSummaryDto) => void; onAsset: (id: string) => void }) {
+function Preparation({ api, scope, caseId, selectedRunId, csrfToken, onRun, onAsset }: { api: SpaceApi; scope: string; caseId: string; selectedRunId?: string; csrfToken?: string | null; onRun: (run: RunSummaryDto) => void; onAsset: (id: string) => void }) {
   const client = useQueryClient();
   const queryKey = ['space', scope, api.root, 'preparation', caseId];
   const prepared = useQuery({ queryKey, queryFn: ({ signal }) => api.preparation(caseId, signal), retry: false });
@@ -66,7 +66,7 @@ function Preparation({ api, scope, caseId, csrfToken, onRun, onAsset }: { api: S
   const [receipt, setReceipt] = useState<BusinessCommandReceiptDto>();
   const startKey = useRef(uuid());
   if (prepared.isPending) return <p className="sw-business-action">正在读取冻结输入…</p>;
-  if (prepared.error instanceof SpaceApiError && prepared.error.status === 404) return <p className="sw-business-action sw-muted">本案例没有普通业务准备记录。可查看已有运行，或新建业务。</p>;
+  if (prepared.error instanceof SpaceApiError && prepared.error.status === 404) return <p className="sw-business-action sw-muted">本案例没有普通业务准备记录。{selectedRunId ? '该次运行的输入可阅读上方“本次冻结输入”。' : '已冻结的输入可阅读上方“案例冻结输入”；选择运行后，可阅读该次“本次冻结输入”。'}</p>;
   if (prepared.error) return <div className="sw-business-action" role="alert"><p>{prepared.error instanceof Error ? prepared.error.message : '无法读取准备记录。'}</p><button onClick={() => void prepared.refetch()}>重试</button></div>;
   const value = prepared.data!;
   const start = async () => {
@@ -103,5 +103,5 @@ export function BusinessAction({ api, scope, caseId, selectedRunId, versionId, v
   const [creating, setCreating] = useState(false);
   const [open, setOpen] = useState(!caseId && !selectedRunId);
   useEffect(() => { if (caseId) { setCreating(false); setOpen(!selectedRunId); } }, [caseId, selectedRunId]);
-  return <div className="sw-business-shell"><div className="sw-business-head"><button onClick={() => { setCreating(true); setOpen(true); }}>新建业务</button>{caseId && <button onClick={() => { setCreating(false); setOpen(!open); }}>{open ? '收起业务准备' : '查看业务准备'}</button>}</div>{open && (creating || !caseId ? writable ? <Form key={scope} api={api} scope={scope} versionId={versionId} versionLabel={versionLabel} versionPurpose={versionPurpose} versionPurposeError={versionPurposeError} versions={versions} adoptedVersionId={adoptedVersionId} onVersionSelect={onVersionSelect} csrfToken={csrfToken} onPrepared={onPrepared} /> : <p className="sw-business-action">当前身份没有新建业务权限。</p> : <Preparation key={`${scope}:${caseId}`} api={api} scope={scope} caseId={caseId} csrfToken={csrfToken} onRun={onRun} onAsset={onAsset} />)}</div>;
+  return <div className="sw-business-shell"><div className="sw-business-head"><button onClick={() => { setCreating(true); setOpen(true); }}>新建业务</button>{caseId && <button onClick={() => { setCreating(false); setOpen(!open); }}>{open ? '收起业务准备' : '查看业务准备'}</button>}</div>{open && (creating || !caseId ? writable ? <Form key={scope} api={api} scope={scope} versionId={versionId} versionLabel={versionLabel} versionPurpose={versionPurpose} versionPurposeError={versionPurposeError} versions={versions} adoptedVersionId={adoptedVersionId} onVersionSelect={onVersionSelect} csrfToken={csrfToken} onPrepared={onPrepared} /> : <p className="sw-business-action">当前身份没有新建业务权限。</p> : <Preparation key={`${scope}:${caseId}`} api={api} scope={scope} caseId={caseId} selectedRunId={selectedRunId} csrfToken={csrfToken} onRun={onRun} onAsset={onAsset} />)}</div>;
 }

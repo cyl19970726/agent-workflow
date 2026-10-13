@@ -10,7 +10,7 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "build": "npm run build -w @signal-room/workflow && npm run build -w @signal-room/workflow-codex && npm run build -w @signal-room/workflow-sqlite && npm run build -w @signal-room/workflow-postgres && npm run build -w @signal-room/workflow-space-contracts && npm run build -w @signal-room/workflow-spaces && npm run build -w @signal-room/workflow-read-model && npm run build -w @signal-room/workflow-agent-sdk && npm run build -w @signal-room/workflow-space-api && npm run build -w @signal-room/workflow-workbench-ui",
+    "build": "npm run build -w @signal-room/workflow && npm run build -w @signal-room/workflow-postgres && npm run build -w @signal-room/workflow-space-contracts && npm run build -w @signal-room/workflow-spaces && npm run build -w @signal-room/workflow-read-model && npm run build -w @signal-room/workflow-skill-snapshot && npm run build -w @signal-room/workflow-agent-sdk && npm run build -w @signal-room/workflow-space-api && npm run build -w @signal-room/workflow-workbench-ui",
     "prepare": "npm run build",
     "test": "vitest run",
     "verify": "npm run build && npm run check:docs && npm run check:examples && npm test && npm run examples",
@@ -21,7 +21,8 @@
     "check:examples": "tsc -p examples/tsconfig.json",
     "check:docs": "node scripts/check-doc-links.mjs",
     "test:spaces": "node scripts/test-spaces.mjs",
-    "siwc": "node packages/agent-sdk/dist/cli.js"
+    "siwc": "node packages/agent-sdk/dist/cli.js",
+    "operator": "node packages/spaces/dist/operator-cli.js"
   },
   "devDependencies": {
     "@types/node": "^24.2.1",

@@ -28,6 +28,8 @@ export interface ProcessOccurrence {
   inputBindings: Array<{contextId:string;slot:string;assetVersionId:string}>;
   outputBindings: Array<{contextId:string;slot:string;assetVersionId:string}>;
   state: StepRecord['state']; phasePath?: readonly string[];
+  /** Derived from a failed ancestor phase in this terminal run; technicalSteps retain their recorded states. */
+  terminalFailure?: {state:'failed';provenance:'derived';failedAncestorStepId:string;failedAncestorStepKey:string;error:string};
   inputs: Record<string,string>; outputs: Record<string,string[]>;
   generatedByOccurrenceId?: string;
 }
@@ -148,7 +150,18 @@ export function projectProcess(input: {
     const step=stepById.get(context.stepRunId);
     return step?[[context.id,step] as const]:[];
   }));
-  for(const occurrence of occurrences) occurrence.state=occurrenceState(occurrence,nodes.get(occurrence.nodeId??''),contract,contextSteps);
+  const terminalFailure=events.filter(event=>['workflow.failed','workflow.completed','workflow.canceled'].includes(event.type)).at(-1)?.type==='workflow.failed';
+  const failedPhases=terminalFailure?steps.filter(step=>step.kind==='phase'&&step.state==='failed'&&step.error&&step.phasePath?.length):[];
+  for(const occurrence of occurrences) {
+    occurrence.state=occurrenceState(occurrence,nodes.get(occurrence.nodeId??''),contract,contextSteps);
+    if(!['queued','waiting','running','needs_review'].includes(occurrence.state)||!occurrence.phasePath?.length||
+      !occurrence.technicalSteps.some(step=>step.kind==='agent'||step.kind==='publish'))continue;
+    const ancestor=failedPhases.find(step=>step.id!==occurrence.id&&step.phasePath?.every((part,index)=>occurrence.phasePath?.[index]===part));
+    if(!ancestor)continue;
+    occurrence.state='failed';
+    occurrence.terminalFailure={state:'failed',provenance:'derived',failedAncestorStepId:ancestor.id,
+      failedAncestorStepKey:ancestor.key,error:ancestor.error!};
+  }
   const relations=[...input.relations];
   const assetById=new Map(assets.map(asset=>[asset.id,asset]));
   for(const occurrence of occurrences) {

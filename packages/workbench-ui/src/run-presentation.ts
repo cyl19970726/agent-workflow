@@ -5,6 +5,20 @@ export interface RunStatusFacts {
   assetCount: number;
 }
 
+export interface RunScopeFacts { executionMode?: string | null }
+
+export function runScopeLabel(run: RunScopeFacts): string {
+  if (run.executionMode === 'research-trial') return '研究节点试做（非完整运行）';
+  if (run.executionMode === 'case') return '完整案例运行';
+  return run.executionMode ? `运行范围未知（${run.executionMode}）` : '运行范围未记录';
+}
+
+export function runScopeExplanation(run: RunScopeFacts): string {
+  if (run.executionMode === 'research-trial') return '图展示完整方法结构及已保存的运行记录；本次只是一场研究节点试做。节点出现在图上不代表已执行；试做状态“已完成”不代表整个案例完成。';
+  if (run.executionMode === 'case') return '图展示完整方法结构及本次已保存的运行记录；运行状态仍需与实际节点和产物分别阅读。';
+  return '图展示完整方法结构及已保存的运行记录；此记录未声明可识别的运行范围，不能推断已完成整个案例。';
+}
+
 const stateLabels: Record<string, string> = {
   completed: '已完成', succeeded: '已完成', success: '已完成',
   failed: '失败', running: '运行中', in_progress: '运行中',

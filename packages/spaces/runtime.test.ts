@@ -185,6 +185,62 @@ describe('Space runtime bridge', () => {
     expect(h.starts).toHaveLength(1);
   });
 
+  it('persists a resolver citation rejection as a failed publish without creating an asset', async () => {
+    const h = harness();
+    const citation = new Error('CONTENT citation missing is unresolved in its exact frozen parent');
+    const runtime = await createSpaceRuntime(h.service, 'space-1',
+      {workflowVersionId:'v1',entrypoint:'content',inputManifestId:'manifest-1'}, {
+        underlyingRunner:h.underlyingRunner,
+        resolveAgent() { return {nodeId:'author',inputs:{},instructions:'Write'}; },
+        resolvePublication() { throw citation; },
+      });
+    await expect(runWorkflow({workflow:contentWorkflow,input:{prompt:'Topic'},
+      store:runtime.store,agentRunner:runtime.agentRunner})).rejects.toBe(citation);
+    const [run]=await h.base.listRuns();
+    const steps=await h.base.listSteps(run!.id);
+    const published=steps.find(step=>step.kind==='publish');
+    expect(published).toMatchObject({state:'failed',error:citation.message});
+    expect((await h.base.listAttempts(published!.id))[0]).toMatchObject({state:'failed',error:citation.message});
+    expect(await h.base.listArtifacts(run!.id)).toHaveLength(0);
+    expect(h.contexts.filter(context=>context.producer==='program')).toHaveLength(0);
+  });
+
+  it('records a pre-commit publication binding rejection on the publish attempt', async () => {
+    const h = harness();
+    const runtime = await createSpaceRuntime(h.service, 'space-1',
+      {workflowVersionId:'v1',entrypoint:'content',inputManifestId:'manifest-1'}, {
+        underlyingRunner:h.underlyingRunner,
+        resolveAgent() { return {nodeId:'author',inputs:{},instructions:'Write'}; },
+        resolvePublication() { return {nodeId:'author',inputs:{},outputSlot:''}; },
+      });
+    await expect(runWorkflow({workflow:contentWorkflow,input:{prompt:'Topic'},
+      store:runtime.store,agentRunner:runtime.agentRunner})).rejects.toThrow('Output slot is required');
+    const [run]=await h.base.listRuns();
+    const published=(await h.base.listSteps(run!.id)).find(step=>step.kind==='publish');
+    expect(published).toMatchObject({state:'failed',error:'Output slot is required'});
+    expect((await h.base.listAttempts(published!.id))[0]).toMatchObject({state:'failed',error:'Output slot is required'});
+    expect(await h.base.listArtifacts(run!.id)).toHaveLength(0);
+  });
+
+  it('keeps a publication attempt unresolved when the atomic commit acknowledgement is unknown', async () => {
+    const h = harness();
+    const lostAcknowledgement = new Error('Publication commit acknowledgement lost');
+    h.service.commitRuntimePublication = async () => { throw lostAcknowledgement; };
+    const runtime = await createSpaceRuntime(h.service, 'space-1',
+      {workflowVersionId:'v1',entrypoint:'content',inputManifestId:'manifest-1'}, {
+        underlyingRunner:h.underlyingRunner,
+        resolveAgent() { return {nodeId:'author',inputs:{},instructions:'Write'}; },
+        resolvePublication() { return {nodeId:'author',inputs:{},outputSlot:'draft'}; },
+      });
+    await expect(runWorkflow({workflow:contentWorkflow,input:{prompt:'Topic'},
+      store:runtime.store,agentRunner:runtime.agentRunner})).rejects.toBe(lostAcknowledgement);
+    const [run]=await h.base.listRuns();
+    const published=(await h.base.listSteps(run!.id)).find(step=>step.kind==='publish');
+    expect(published).toMatchObject({state:'running'});
+    expect((await h.base.listAttempts(published!.id))[0]).toMatchObject({state:'running'});
+    expect(await h.base.listArtifacts(run!.id)).toHaveLength(0);
+  });
+
   it('preserves uncertain agent persistence and reports known runner failures', async () => {
     const h = harness();
     const runtime = await createSpaceRuntime(h.service, 'space-1',

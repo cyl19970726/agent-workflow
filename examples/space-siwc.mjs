@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import { runWorkflow, defineAgent } from '../packages/core/dist/index.js';
 import { JSON_SCHEMA_DIALECT } from '../packages/space-contracts/dist/index.js';
 import { WorkflowSpaceService, PostgresBlobStore, migrateWorkflowSpaces, createSpaceRuntime, nodeReadTools } from '../packages/spaces/dist/index.js';
-import { SiwcAuth, SiwcResponsesRunner } from '../packages/agent-sdk/dist/index.js';
+import { SiwcAuth, OpenAIAgentsSdkRunner } from '../packages/agent-sdk/dist/index.js';
 
 // Opt-in live connection/storage check; never part of the offline test or examples scripts.
 if (!process.env.WORKFLOW_DATABASE_URL || !process.env.WORKFLOW_SIWC_MODEL) throw new Error('Set WORKFLOW_DATABASE_URL and an explicitly selected WORKFLOW_SIWC_MODEL. Run workflow-siwc login first.');
@@ -19,7 +19,7 @@ try {
   const source=await service.importAsset(space.id,{schema,payload:{answer:'A Workflow Space keeps a business purpose, exact asset versions, sessions and review history together.'},description:'Synthetic public test sentence; not a creative deliverable',idempotencyKey:'source'});
   await service.createCase(space.id,{id:'probe',title:'SIWC storage probe',objective:'Read the bound source using its tool, summarize in one sentence, persist observed output.',constraints:['No web tools','No publication','No hidden reasoning requested']});
   const manifest=await service.freezeInputs(space.id,'probe',{source:source.id});
-  const runner=new SiwcResponsesRunner({auth:new SiwcAuth(),maxTurns:2,maxToolCalls:1,tools:async request=>{
+  const runner=new OpenAIAgentsSdkRunner({auth:new SiwcAuth(),maxTurns:2,maxToolCalls:1,tools:async request=>{
     const context=(await service.runtimeContexts(space.id,request.runId)).find(c=>c.attemptId===request.attemptId);
     if(!context) throw new Error('Harness context missing');
     return nodeReadTools(await service.nodeClient(space.id,context.id));

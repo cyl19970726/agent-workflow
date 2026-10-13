@@ -54,7 +54,7 @@ Domain workflows and production dispatch live in the consuming application. They
 
 ## Execution and recovery
 
-- `RunStore` owns run, step, attempt, artifact and event persistence. SQLite implementation is in `@signal-room/workflow-sqlite`; `MemoryRunStore` is for tests and transient use.
+- `RunStore` owns run, step, attempt, artifact and event persistence. New persistent workflow execution uses the PostgreSQL store, `@signal-room/workflow-postgres`; `MemoryRunStore` is for tests and transient use. SQLite is not a runtime store or fallback. Legacy SQLite records are accepted only through an explicitly selected read-only import path.
 - `AgentRunner` owns model invocation. Model and reasoning effort are explicit agent configuration; there is no automatic more-expensive fallback.
 - `task`, `agent`, `call`, `mapSettled`, `parallel`, `parallelSettled`, `phase`, `validate`, `publish` and `decide` use explicit stable keys. Reusing a key for a different semantic operation is a workflow authoring error. Inner phase keys are scoped by the complete phase path.
 - A resume re-executes the workflow function from the beginning. Successful **validated** nodes with the same workflow revision, node key, input and configuration fingerprints are reused. This is node replay, not arbitrary JavaScript continuation or exactly-once side effects.
@@ -71,4 +71,4 @@ Domain workflows and production dispatch live in the consuming application. They
 
 Events are sequenced per workflow run by the store. Each step links attempts and immutable artifact references; artifacts record schema, revision, SHA-256, producer and dependencies. Model usage is unknown when unavailable, never zero by default.
 
-Codex prompts, tool output, skill snapshots and raw JSONL remain in private runtime trace directories outside `/artifacts`. HTTP serves bounded operational summaries and registered research assets, not a general local-file endpoint. Unknown asset schemas have a safe JSON fallback in the workbench.
+Agent prompts, tool output and raw provider traces remain in private runtime storage outside `/artifacts`. Historical Codex trace files can be inspected as read-only evidence through `@signal-room/workflow-read-model`; they are never resumed as workflow execution. HTTP serves bounded operational summaries and registered research assets, not a general local-file endpoint. Unknown asset schemas have a safe JSON fallback in the workbench.

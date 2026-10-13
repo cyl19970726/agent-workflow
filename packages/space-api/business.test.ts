@@ -75,6 +75,14 @@ it('binds start and dispatch to the exact case, version, manifest and run',async
   expect((await post(mismatch.url+'/cases/c/runs',{versionId:'v',inputManifestId:'m',key:'start'})).status).toBe(409);
 });
 
+it('awaits asynchronous availability before starting and blocks an unavailable executor',async()=>{
+  const app=await serve({host:{availability:async versionId=>{expect(versionId).toBe('v');return {state:'unavailable',reason:'Frozen release is missing'};}}});
+  const response=await post(app.url+'/cases/c/runs',{versionId:'v',inputManifestId:'m',key:'start'});
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({error:{code:'UNAVAILABLE'}});
+  expect(app.counts().starts).toBe(0);
+});
+
 it('maps only an approved structured domain relation mismatch to 409',async()=>{
   const mismatch=await serve({business:{start:async()=>{throw {status:409,code:'RELATION_MISMATCH',message:'Saved manifest does not match the selected Case',details:{secret:'hidden'}}}}});
   const response=await post(mismatch.url+'/cases/c/runs',{versionId:'v',inputManifestId:'m',key:'start'});

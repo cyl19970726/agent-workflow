@@ -1,6 +1,6 @@
 import type { ProcessDecisionBinding } from './types.js';
 import type { ProcessContract } from './process-contract.js';
-import { AtomicStepReconciliationRequiredError, artifactPayloadSha256 } from '@signal-room/workflow';
+import { AtomicStepCommitRejectedError, AtomicStepReconciliationRequiredError, artifactPayloadSha256 } from '@signal-room/workflow';
 import type {
   AgentRunRequest, AgentRunResult, AgentRunner, ArtifactDraft, ArtifactRef, AttemptRecord, EventDraft,
   RunRecord, RunStore, StepRecord, StepResultCommit, StepResultReceipt, WorkflowEvent, ValidationState,
@@ -217,25 +217,34 @@ export async function createSpaceRuntime(service: SpaceRuntimeService, spaceId: 
         return base.commitStepResult!(commit);
       }
       const artifact = commit.artifact;
-      const resolved = await options.resolvePublication(artifact, api);
-      required(resolved.outputSlot, 'Output slot');
-      const runId = artifact.producedBy.workflowRunId;
-      if (artifact.producedBy.stepRunId !== commit.stepRunId || artifact.producedBy.attemptId !== commit.attemptId) {
-        throw new Error('Core publication source does not match its step commit');
+      let context: NodeContext;
+      let nodeCommit: NodeCommit;
+      try {
+        const resolved = await options.resolvePublication(artifact, api);
+        required(resolved.outputSlot, 'Output slot');
+        const runId = artifact.producedBy.workflowRunId;
+        if (artifact.producedBy.stepRunId !== commit.stepRunId || artifact.producedBy.attemptId !== commit.attemptId) {
+          throw new Error('Core publication source does not match its step commit');
+        }
+        context = await ensureContext(runId, commit.stepRunId, commit.attemptId, resolved,
+          'program', artifact.payload, { artifactType: artifact.type, schemaVersion: artifact.schemaVersion },
+          resolved.generatedByContextId);
+        nodeCommit = {
+          idempotencyKey: commit.idempotencyKey,
+          outputs: [{ slot: resolved.outputSlot, payload: artifact.payload,
+            dependencySlots: resolved.dependencySlots ?? Object.keys(resolved.inputs),
+            ...(resolved.assetId ? { assetId: resolved.assetId } : {}),
+            ...(resolved.expectedHead ? { expectedHead: resolved.expectedHead } : {}),
+            ...(resolved.blobIds ? { blobIds: resolved.blobIds } : {}) }],
+          result: { coreArtifactType: artifact.type, schemaVersion: artifact.schemaVersion },
+          ...(resolved.relations ? {relations:resolved.relations} : {}),
+        };
       }
-      const context = await ensureContext(runId, commit.stepRunId, commit.attemptId, resolved,
-        'program', artifact.payload, { artifactType: artifact.type, schemaVersion: artifact.schemaVersion },
-        resolved.generatedByContextId);
-      const nodeCommit: NodeCommit = {
-        idempotencyKey: commit.idempotencyKey,
-        outputs: [{ slot: resolved.outputSlot, payload: artifact.payload,
-          dependencySlots: resolved.dependencySlots ?? Object.keys(resolved.inputs),
-          ...(resolved.assetId ? { assetId: resolved.assetId } : {}),
-          ...(resolved.expectedHead ? { expectedHead: resolved.expectedHead } : {}),
-          ...(resolved.blobIds ? { blobIds: resolved.blobIds } : {}) }],
-        result: { coreArtifactType: artifact.type, schemaVersion: artifact.schemaVersion },
-        ...(resolved.relations ? {relations:resolved.relations} : {}),
-      };
+      catch (error) {
+        // No domain/core publication commit was invoked. This exact step may fail,
+        // while a rejection from commitRuntimePublication still needs reconciliation.
+        throw new AtomicStepCommitRejectedError(error);
+      }
       return service.commitRuntimePublication(spaceId, context.id, commit, nodeCommit);
     },
   };

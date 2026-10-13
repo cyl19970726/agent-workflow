@@ -1,10 +1,10 @@
 # Workflow Space 存储：当前实现与接入
 
-本页只说明当前 `@signal-room/workflow-space-contracts` 与 `@signal-room/workflow-spaces` 的可用接口。更广的业务设计见 [Workflow Space](workflow-spaces.md)，执行账本见 [PG 存储指南](postgres-storage.md)。Space 以一个业务目的为单位；一个 Space 可保存多个已发布 workflow 版本、case、run、资产版本、会话、评价和采用记录。`workflowId` 仍是底层执行身份。
+本页说明 `@signal-room/workflow-space-contracts` 与 `@signal-room/workflow-spaces` 的现有接口。research、analysis、creation 的代码接线、PG + 官方 Agents SDK 迁移和指定回归已完成。Creation launcher 已切换到新配置：main／first-design 的配置和 metadata 使用 `ordinary-content-20261012`；没有触发新模型运行或方法采用，既有 5 条 run 记录未改变。单帖新 run 与浏览器报告阅读已完成，候选为 `revised_unverified`；一条相矛盾的 Reviewer minor finding 已驳回，独立审阅没有通过结论。只读审计确认先前完整性缺口已修复，少量精度备注仍在质量调优中；不据此声称整体业务质量成熟。新执行以 PostgreSQL 为持久运行基线，SQLite 仅通过显式只读历史导入处理，不能 fallback。更广的领域关系见[Workflow Space](workflow-spaces.md)，执行生命周期见[执行 harness 与执行器架构](postgres-sdk-plan.md)，两层存储的责任见[存储全貌与 Workflow 配合](storage-architecture.md)。Space 以一个业务目的为单位；一个 Space 可保存多个已发布 workflow 版本、case、run、资产版本、会话、评价和采用记录。`workflowId` 仍是底层执行身份。[改写前的完整接入记录](space-storage-history-2026-10-10.md)保留旧实跑说明。
 
 ## 启动与权限边界
 
-使用 Node 24 和本 workspace 已安装的依赖。宿主提供一个由自己创建和关闭的 `pg` pool；先调用 `migrateWorkflowSpaces(pool)`，再迁移选定的 BlobStore。最小服务装配如下，数据库连接值由部署环境提供，不写入仓库：
+使用 Node 24 和本 workspace 已安装的依赖。宿主提供由自己创建和关闭的 `pg` pool；先调用 `migrateWorkflowSpaces(pool)`，再迁移所选 BlobStore。以下是 **PostgreSQL 小附件基线** 的最小服务装配，数据库连接值由部署环境提供，不写入仓库：
 
 ```ts
 import { Pool } from 'pg';
@@ -19,11 +19,13 @@ const spaces = new WorkflowSpaceService(pool, blobs, principal);
 // 宿主停止时 await pool.end();
 ```
 
+要让**新附件**写入私有 R2，可信宿主显式配置 `RoutedBlobStore(new PostgresBlobStore(pool), createR2BlobStore(privateConfig))`。`privateConfig` 由宿主从权限受限的私有文件或密钥服务读取，不传节点或浏览器。路由仍能读取旧 PostgreSQL blob；R2 未配置时读取 R2 key 会明确失败。当前两个后端都只支持单对象至 16 MiB；R2 不提供 multipart、自动 GC 或备份恢复。[完整配置和实际验证边界](storage-architecture.md#当前接入与验证范围)另有说明。
+
 宿主必须在每个调用者边界绑定真实 `SpacePrincipal`。服务检查成员身份和 owner / creator / operator / viewer 角色；数据库没有 RLS，持有 pool 的代码属于可信宿主。节点不能拿到 `WorkflowSpaceService`、pool、`runtimeLedger()`、可任选 `spaceId` 的通用接口或凭证。宿主通过 `nodeClient(spaceId, contextId)` 给节点一个经服务验证的限定客户端：`read(slot)`、`readFull(slot)`、`submit(commit)`、`act(action,input)`。投影视图不能用 `readFull` 绕过；`nodeReadTools(client)` 可把绑定输入阅读变成执行器工具。`act` 当前只允许合同批准的 `evaluate`，且评价对象与证据必须是该节点绑定输入；人工接受、修订和采用由认证为 human 的宿主服务完成。
 
-`createSpaceConsole(service)` 只渲染只读页面，逐次通过已绑定的服务读取；它不认证 HTTP 请求。单用户本机可绑定 loopback；多用户部署须在 HTTP 宿主按请求认证并绑定对应服务，不能让所有访问者共用一个人的服务实例。没有内置队列、租约或多租户数据库隔离。
+`createSpaceConsole(service)` 只渲染只读页面，逐次通过已绑定的服务读取；它不认证 HTTP 请求。单用户本机可绑定 loopback；多用户部署须在 HTTP 宿主按请求认证并绑定对应服务，不能让所有访问者共用一个人的服务实例。**直接 `startRun`／`createSpaceRuntime` 是最小装配；持久执行任务、租约和显式 worker 由可选的 `WorkflowExecutionManager` 提供。** 这仍不等于多租户数据库隔离或进程沙箱。
 
-节点能力约束适用于经本服务发起的操作，不会自动沙箱化执行器已有的文件系统、shell 或其他工具。宿主必须避免再向节点提供可以读取完整资产或凭证的旁路。本轮真实 SIWC 探针只注入绑定的资产阅读工具；Codex 环境隔离与临时 VM 不属于这次验收。
+节点能力约束适用于经本服务发起的操作，不会自动沙箱化执行器已有的文件系统、shell 或其他工具。宿主必须避免再向节点提供可以读取完整资产或凭证的旁路。旧 SIWC 探针只注入绑定的资产阅读工具，不能证明当前 SDK 调度或单帖真实端到端质量；Codex execution adapter 已退役，legacy Codex trace 只供 read-model 只读解码。临时 VM 不属于当前实现范围。
 
 控制台可通过 `createSpaceConsole(service, { readers })` 注入按 `namespace@revision` 选择的业务阅读器，返回标题和正文分节；缺少专用阅读器时显示结构化正文。它不会改变资产原文或授权范围。
 
@@ -43,9 +45,9 @@ const spaces = new WorkflowSpaceService(pool, blobs, principal);
 
 `ProcessContractDraft.runInputs` 将命名的冻结运行输入绑定到准确 schema；`dataBindings` 指定输入来自某节点输出或冻结输入，并用有限的 `selection` 和首次／后续轮次条件表达来源。发布校验引用、schema 一致性与条件是否重叠。这是声明合同，实际消耗的资产版本仍以节点 context 收据为准；通用运行时差异检查和自动调度尚未实现。完整范围与验证见[方法工作台实施记录](workbench-method-implementation-2026-10-05.md)。
 
-旧 core workflow 可用 `createSpaceRuntime(service, spaceId, {workflowVersionId,entrypoint,inputManifestId}, {underlyingRunner,resolveAgent,resolvePublication})` 接入。两个 resolver 在可信宿主中把 core 的 agent / artifact 映射到准确节点、输入版本与输出槽；Agent 原始观察结果与程序发布产物分开记录。当前桥接把已观察的 Agent 原始输出和 core 完成收据放在同一 PG 事务，另把程序发布的 Space 资产和 core artifact 收据放在同一 PG 事务。确定性丢失回执测试验证：已持久化的 Agent 结果可复用，不会再次调用 runner。格式不合格的模型输出连同 schema 错误原子保存为失败记录；不把确定的格式错误混同为提交结果未知。外部模型/工具副作用、原生 SDK 会话状态不因此获得 exactly-once 或任意恢复能力。creation 已用现有 CONTENT 流程通过确定性 PG 接入、多轮返工与反馈回归；作品档案和独立 B3 程序样例也已读写验证，完整 B3 媒体运行仍未验收。接口示例见 [`runtime.test.ts`](../packages/spaces/runtime.test.ts)。`SiwcResponsesRunner` 是可选的 SIWC Responses 适配器，不是一般 OpenAI Agents SDK。
+旧 core workflow 可用 `createSpaceRuntime(service, spaceId, {workflowVersionId,entrypoint,inputManifestId}, {underlyingRunner,resolveAgent,resolvePublication})` 接入。两个 resolver 在可信宿主中把 core 的 agent / artifact 映射到准确节点、输入版本与输出槽；Agent 原始观察结果与程序发布产物分开记录。当前桥接把已观察的 Agent 原始输出和 core 完成收据放在同一 PG 事务，另把程序发布的 Space 资产和 core artifact 收据放在同一 PG 事务。已有确定性回归曾验证：已持久化的 Agent 结果可复用，不会再次调用 runner；格式不合格的模型输出连同 schema 错误原子保存为失败记录。这些测试各自验证相应共享桥接，不单独证明完整业务质量。外部模型／工具副作用、原生 SDK 会话状态不因此获得 exactly-once 或任意恢复能力。Creation 本轮 PG 回归与配置迁移已完成；新版本已登记并在浏览器显示可执行，业务正文和 graph 保持相同。main／first-design 配置和 metadata 均为 `ordinary-content-20261012`，没有新模型运行或方法采用，原有 5 条 run 记录保持不变。接口示例见 [`runtime.test.ts`](../packages/spaces/runtime.test.ts)。`OpenAIAgentsSdkRunner` 使用官方 Agents SDK 驱动角色内部循环，SIWC 适配单次 Responses 请求。该受限集成不提供通用原生会话恢复，详见[执行器包说明](../packages/agent-sdk/README.md)。
 
-2026-10-04 的可选实跑已用应用自行授权的 ChatGPT 订阅连接和 `gpt-6-astra` low 完成一轮**合成材料**生产探针：一个绑定资产读取、两个 Responses 回合、原始文本/工具/读取事件及产物均保存到 Space。随后在新的独立 Agent session 中，审阅者读取冻结的来源和候选版本，四问原始回答按绑定评价动作保存。此证据验证了这条有限链路，不表示创作质量通过，也没有人类接受或采用动作。生产云部署、完整媒体及原生 SDK 会话恢复仍待完成。
+以下两个 SIWC 脚本是**显式 opt-in 的模型探针**，不是普通测试。历史探针曾验证合成材料的绑定读取、可观察事件、原始输出和独立审阅入库；它发生在执行 loop 改由官方 SDK 管理之前，只能作为当时账号／传输／工具路径证据，不能证明当前 SDK 调度或单帖新一轮真实端到端质量，也不证明创作质量、人工接受或采用。历史实测见[历史接入记录](space-storage-history-2026-10-10.md)，当前执行器边界见[执行 harness 架构](postgres-sdk-plan.md)。
 
 实跑脚本为显式 opt-in，会发起实际模型请求并在指定数据库留存合成探针记录；不属于 `npm test` 或普通 examples。先在本地环境设置 `WORKFLOW_DATABASE_URL` 与明确选择的 `WORKFLOW_SIWC_MODEL`，完成 `node packages/agent-sdk/dist/cli.js login`，再运行：
 
@@ -65,7 +67,9 @@ node examples/space-siwc-review.mjs
 
 `startRun`、`submitNode`、资产导入/转换、状态转换及采用使用持久幂等键：相同请求重试返回同一收据，改动内容复用同键会冲突。`startNode` 以 run 中的 step key 或既有 attempt 对账，相同请求返回已有 context；不应在未知提交结果后换 key 重启模型。core 原子步骤提交已保存时，优先读回收据；若外部模型或工具的结果仍未知，先对账，不能据数据库事务推断外部 exactly-once。`freezeInputs` 按 case 和准确输入槽／版本计算清单 ID，同一请求重复调用返回同一清单。跨 Space 引用和未绑定的节点依赖会拒绝；状态变化按发布版本合同和认证主体判定。
 
-`PostgresBlobStore` 确实保存字节，但默认单对象上限为 16 MiB，只适合小素材和集成基线。大媒体需要私有持久对象存储的 `BlobStore` 实现，并完成部署、备份及上传对账；当前未提供 provider，也未完成完整媒体链路。BlobStore 的 durable `put` 先于资产提交，数据库只能原子提交自身记录；外部副作用和孤儿对象须由宿主对账。
+`PostgresBlobStore` 确实保存字节，但默认单对象上限为 16 MiB，只适合小素材和集成基线。已提供私有 R2 `BlobStore` 与旧 PG 字节路由，当前 R2 同样限制单对象 16 MiB；完整媒体链路、分块上传、自动对象清理及备份恢复仍待建设。`BlobStore.put` 先于资产提交，数据库只能原子提交自身记录；外部副作用和孤儿对象须由宿主对账。当前架构与验证见[存储全貌与 Workflow 配合](storage-architecture.md)。
+
+受权宿主可显式开放附件 API；写入还需认证主体是 human 或可信 design Agent、Space 写权限、同源 CSRF 和宿主 `attachmentWrites:true`。observer 与只读宿主不能写。CLI 不把本地文件路径保存成资产：先 `blob-upload --file /absolute/source.pdf --media-type application/pdf`，得到 SHA-256 blob ID；再用 `asset-import --file /absolute/import.json`，请求中明确 `assetId`、`expectedHead`（初版为 `null`）、已注册的 `schema`、`payload`、`description`、`blobIds` 和 `idempotencyKey`。读取用 `attachment-download <asset-version-id> <blob-id> --out /absolute/destination`，它先检查该 blob 绑定准确资产版本，再验证媒体类型、长度和 SHA-256，独占创建本地文件。该文件是可删除的读出物，不是业务正本。HTTP 合同由[Space API](../packages/space-api/server.ts)实现。
 
 使用专用、可丢弃的 PostgreSQL 测试库设置 `WORKFLOW_TEST_DATABASE_URL`，在 `agent-workflow` 根目录运行：
 
@@ -75,7 +79,7 @@ npm run test:spaces
 npm run check:docs
 ```
 
-`test:spaces` 在未设置测试库变量时会报错，不会静默跳过；测试是确定性的，不调用模型。最终隔离安装验证的共享 `npm run verify` 已通过 16 个测试文件、123 个测试，其中包含 16 个真实 PG Space 领域测试与 6 个 ledger 测试；共享构建、文档链接、示例类型检查及离线示例也通过。这些检查验证存储合同、权限边界和恢复行为，不代表 creation 业务效果或生产部署已验收。
+`test:spaces` 在未设置测试库变量时会报错，不会静默跳过；这些检查是确定性的，不调用模型。构建与测试验证接口、权限、持久性和恢复路径，不代表 creation 业务效果或生产部署已验收。
 
 
 ## 准确执行器与持久运行任务

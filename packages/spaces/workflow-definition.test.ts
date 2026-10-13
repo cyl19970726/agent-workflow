@@ -72,4 +72,26 @@ const url=process.env.WORKFLOW_TEST_DATABASE_URL;
       await expect(service.publishWorkflow(space.id,candidate)).rejects.toThrow(error);
     }
   });
+  it('freezes optional tool definitions and skill sources without changing older method declarations',async()=>{
+    const {space,version}=await fixture();
+    const first=version('with-tool-details');
+    const writer=first.entrypoints.main!.nodeDefinitions!.writer!;
+    writer.tools=['read_bound_asset'];
+    writer.toolDefinitions=[{name:'read_bound_asset',description:'Read the bound input',parameters:{type:'object',properties:{slot:{type:'string'}},required:['slot']},outputSchema:{type:'object'}}];
+    writer.skills=[{name:'writer-method',sourceRef:'skill://writer-method',revision:'1'}];
+    const saved=await service.publishWorkflow(space.id,first);
+    expect(saved.entrypoints.main!.nodeDefinitions!.writer).toMatchObject({tools:['read_bound_asset'],toolDefinitions:writer.toolDefinitions,skills:writer.skills});
+    expect((await service.publishWorkflow(space.id,first)).hash).toBe(saved.hash);
+    const altered=version('with-tool-details');altered.entrypoints.main!.nodeDefinitions!.writer!.tools=['read_bound_asset'];
+    altered.entrypoints.main!.nodeDefinitions!.writer!.toolDefinitions=[{...writer.toolDefinitions[0]!,description:'Changed live implementation'}];
+    await expect(service.publishWorkflow(space.id,altered)).rejects.toThrow('immutable');
+    const old=await service.publishWorkflow(space.id,version('historic-name-only'));
+    expect(old.entrypoints.main!.nodeDefinitions!.writer!.toolDefinitions).toBeUndefined();
+    expect(old.entrypoints.main!.nodeDefinitions!.writer!.skills).toBeUndefined();
+    const invalid=version('mismatched-tool');invalid.entrypoints.main!.nodeDefinitions!.writer!.toolDefinitions=writer.toolDefinitions;
+    await expect(service.publishWorkflow(space.id,invalid)).rejects.toThrow('match a declared tool name');
+    const secret=version('tool-secret');secret.entrypoints.main!.nodeDefinitions!.writer!.tools=['read_bound_asset'];
+    secret.entrypoints.main!.nodeDefinitions!.writer!.toolDefinitions=[{...writer.toolDefinitions[0]!,parameters:{api_key:'secret'}}];
+    await expect(service.publishWorkflow(space.id,secret)).rejects.toThrow('Credentials');
+  });
 });

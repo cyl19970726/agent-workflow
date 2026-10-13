@@ -2,15 +2,37 @@ import type { SchemaRef, StorageContractDraft, FrozenStorageContract } from '@si
 import type { ProcessContractDraft, ProcessContract } from './process-contract.js';
 
 /** Supplied by the host's authentication layer, never from an Agent tool argument. */
-export interface SpacePrincipal { id: string; kind: 'human' | 'service' }
+export interface SpacePrincipal { id: string; kind: 'human' | 'service'; /** Trusted host credential binding, never request-body data. */ externalAgent?: {id:string;sessionId:string;role?:'design'|'observer'} }
 export type SpaceRole = 'owner' | 'creator' | 'operator' | 'viewer';
-export interface WorkflowSpace { id: string; purpose: string; owner: string; status: 'active' | 'archived'; createdAt: string }
+export interface DesignSpaceScope { workflowId:string; entrypoint:string }
+export interface DesignSpaceAgent { agentId:string; sessionId:string; principalId:string }
+export interface DesignSpaceCounts {
+  workflowVersions:number; understandingRevisions:number; methodDesignRevisions:number;
+  cases:number; runs:number; businessAssets:number; assetVersions:number; adoptions:number;
+}
+export interface DesignSpaceProvisionInput { id:string; purpose:string; scope:DesignSpaceScope; idempotencyKey:string }
+export interface DesignSpaceProvisionReceipt {
+  space:WorkflowSpace; scope:DesignSpaceScope; createdBy:DesignSpaceAgent; initialCounts:DesignSpaceCounts;
+}
+export interface DesignSpaceState {
+  space:WorkflowSpace; scope:DesignSpaceScope; counts:DesignSpaceCounts; understandingRevisionId:string|null;
+}
+export interface WorkflowSpace {
+  id: string; purpose: string; owner: string; status: 'active' | 'archived'; createdAt: string;
+  /** Host-provisioned, immutable design-only identity. Historic Spaces omit it. */
+  designScope?:DesignSpaceScope;
+  provisionedBy?:DesignSpaceAgent;
+}
 /** Frozen authoring details keyed by process node ID. Historic versions may lack these details. */
 export interface WorkflowNodeDefinition {
   purpose?: string;
   instructions?: string;
   model?: string;
   tools?: string[];
+  /** Optional frozen descriptions. Historic versions may retain tool names only. */
+  toolDefinitions?: Array<{name:string;description:string;parameters:Record<string,unknown>;outputSchema?:Record<string,unknown>}>;
+  /** Optional source references recorded when this version was authored. */
+  skills?: Array<{name:string;sourceRef:string;revision?:string}>;
   /** Declared execution responsibility; omitted for historic or unknown executors. */
   executor?: { family: 'agent-sdk' | 'codex' | 'program' | 'human' | 'decision'; adapter?: string };
   configuration?: Record<string, unknown>;
@@ -21,6 +43,8 @@ export interface WorkflowVersionDraft {
   id: string; revision: string; predecessorId?: string; changeReason: string;
   entrypoints: Record<string, WorkflowEntrypointDraft>;
   config: Record<string, unknown>;
+  /** Exact immutable design and Space understanding revisions used when forming this version. */
+  designBasis?: {designRevisionId:string;designPayloadHash:string;understandingRevisionId:string;understandingPayloadHash:string};
 }
 export interface WorkflowVersion extends Omit<WorkflowVersionDraft, 'entrypoints'> {
   spaceId: string; hash: string; createdAt: string;
@@ -32,12 +56,20 @@ export interface SpaceRun {
   runId: string; spaceId: string; workflowVersionId: string; entrypoint: string; caseId: string;
   inputManifestId: string; effectiveConfig: Record<string, unknown>; configHash: string;
   process?: { revision: string; hash: string };
+  /** Existing ledger evidence copied into this Space; no execution was started by the import. */
+  executionMode?: 'imported';
+  historicalSource?: {workspaceId:string;runId:string};
 }
 export type AssetSource =
   | { kind: 'import'; actorId: string; description: string }
   | { kind: 'node'; runId: string; stepRunId: string; attemptId: string; nodeId: string; producer: 'agent' | 'program'; sessionId: string; contextId: string; generatedByContextId?: string }
+  | { kind: 'historical-artifact'; runId:string; stepRunId:string; attemptId:string; artifactId:string;
+      sourceWorkspaceId:string; originalSha256:string; originalUri:string }
   | { kind: 'transform'; actorId: string; description: string; fromVersionIds: string[]; operation: string };
-export interface BlobManifest { id: string; spaceId: string; sha256: string; size: number; mediaType: string; key: string }
+export function isRunAssetSource(source:AssetSource):source is Extract<AssetSource,{kind:'node'|'historical-artifact'}> {
+  return source.kind==='node'||source.kind==='historical-artifact';
+}
+export interface BlobManifest { id: string; spaceId: string; sha256: string; size: number; mediaType: string; key: string; /** Absent on historical PostgreSQL manifests. */ backend?: 'r2' }
 export interface AssetVersion {
   id: string; spaceId: string; assetId: string; version: number; schema: SchemaRef; payload: unknown; payloadHash: string;
   source: AssetSource; dependencies: string[]; attachments: BlobManifest[]; initialState: string; createdAt: string;
@@ -85,9 +117,20 @@ export interface KnowledgeRevision {
   id: string; spaceId: string; entryId: string; previousId?: string; content: string; classification: 'fact' | 'inference';
   scope: { caseId?: string; roles?: string[] }; sourceAssetIds: string[]; sourceMessageIds: string[]; status: 'active' | 'superseded'; author: string;
 }
+/** Immutable reference to one persisted assistant reply, never an asset or acceptance. */
+export interface SavedResponseTarget {
+  runId: string; occurrenceId: string; stepRunId: string; attemptId: string;
+  sessionId: string; eventId: string; eventSeq: number; outputHash: string;
+}
 export interface ReviewDraft {
   id: string; runId: string; assetVersionIds: string[]; baselineReviewId?: string; standard: { id: string; revision: string; content: string };
   judge: { kind: 'human' | 'agent'; id: string; sessionId?: string }; evidence: string[];
+  /** Only for a failed occurrence whose exact saved reply has no published asset. */
+  responseTarget?: SavedResponseTarget;
+  /** Immutable server observation receipt required for an external Agent judge. */
+  observationReceiptId?: string;
+  /** JSON Pointers into the saved assistant output; checked against the original payload. */
+  evidencePointers?: string[];
   answers: { good: string; bad: string; improvement: string; unresolved: string };
 }
 export interface Review extends ReviewDraft { spaceId: string; createdAt: string }

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ArtifactRef, PhaseContext } from "./contracts.js";
 import type { AgentRunRequest, AgentRunResult, AgentRunner, ChildWorkflowDispatcher, ChildWorkflowDispatchRequest, StepResultCommit, StepResultReceipt } from "./ports.js";
 import { MemoryRunStore } from "./memory-run-store.js";
-import { artifactPayloadSha256, AtomicStepReconciliationRequiredError, defineAgent, runWorkflow, workflow, workflowFingerprint, WorkflowCanceledError } from "./runtime.js";
+import { artifactPayloadSha256, AtomicStepCommitRejectedError, AtomicStepReconciliationRequiredError, defineAgent, runWorkflow, workflow, workflowFingerprint, WorkflowCanceledError } from "./runtime.js";
 
 class StubRunner implements AgentRunner {
   calls = 0;
@@ -19,6 +19,7 @@ class AtomicTestStore extends MemoryRunStore {
   readonly commits: StepResultCommit[] = [];
   readonly receipts = new Map<string, StepResultReceipt>();
   failBeforeCommit = false;
+  rejectBeforeCommit?: unknown;
   failReadbackAfterCommitError = false;
   loseNextResponse = false;
   async listSteps(runId: string) {
@@ -30,6 +31,7 @@ class AtomicTestStore extends MemoryRunStore {
     this.commits.push(commit);
     const prior = this.receipts.get(commit.idempotencyKey);
     if (prior) return prior;
+    if (this.rejectBeforeCommit !== undefined) throw new AtomicStepCommitRejectedError(this.rejectBeforeCommit);
     if (this.failBeforeCommit) { this.failReadbackAfterCommitError = true; throw new Error("commit unavailable"); }
     const artifact = commit.artifact ? await super.publishArtifact(commit.artifact) : undefined;
     const output = artifact ?? commit.output;
@@ -88,6 +90,21 @@ describe("workflow runtime", () => {
       .rejects.toThrow("canceled");
     expect(store.artifacts).toHaveLength(0);
     expect(store.commits).toHaveLength(0);
+  });
+
+  it("records a trusted pre-commit publication rejection on the exact step and attempt", async () => {
+    const store = new AtomicTestStore();
+    const citation = new Error("CONTENT citation missing is unresolved in its exact frozen parent");
+    store.rejectBeforeCommit = citation;
+    const flow = workflow("atomic-rejected-publish", { revision: "1" }, (ctx) =>
+      ctx.publish("draft", "content-draft", { sourcesUsed: ["missing"] }, { validation: "valid" }));
+    await expect(runWorkflow({ workflow: flow, input: null, store, agentRunner: noAgent })).rejects.toBe(citation);
+    expect(store.steps).toHaveLength(1);
+    expect(store.steps[0]).toMatchObject({ key: "draft", kind: "publish", state: "failed", error: citation.message });
+    expect(store.attempts).toHaveLength(1);
+    expect(store.attempts[0]).toMatchObject({ stepRunId: store.steps[0]!.id, state: "failed", error: citation.message });
+    expect(store.artifacts).toHaveLength(0);
+    expect((await store.listEvents(store.runs[0]!.id)).map(event => event.type)).toContain("step.failed");
   });
 
   it("requires reconciliation before replaying an unresolved atomic attempt", async () => {

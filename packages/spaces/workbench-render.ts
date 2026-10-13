@@ -1,4 +1,5 @@
 import type { AssetVersion, BlobManifest, SpaceOverview, Review } from './types.js';
+import {isRunAssetSource} from './types.js';
 import type { AssetReader } from './console.js';
 import type { PresentationBinding, WorkflowPresentation, PresentationField, PresentationSection, PresentationComparisonSection } from './presentation.js';
 import type { SpaceWorkbench, WorkbenchCase, WorkbenchRun, ResolvedAssetSource, AssetComparison } from './workbench-model.js';
@@ -6,7 +7,7 @@ import type { SpaceWorkbench, WorkbenchCase, WorkbenchRun, ResolvedAssetSource, 
 export const escapeHtml=(value:unknown):string=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]!));
 const e=escapeHtml;
 export function stateLabel(value:string):string {return ({candidate:'候选',imported:'已导入',archived:'已归档',cancelled:'已取消',invalid:'校验未通过',accepted:'已接受',rejected:'已拒绝',active:'进行中',recorded:'已记录',running:'执行中',completed:'执行完成',succeeded:'执行完成',failed:'执行失败',pending:'等待执行',queued:'已排队',needs_review:'待评价',awaiting_review:'待评价',stopped:'已停止',incomplete:'记录不完整',open:'记录中',complete:'记录完整','not-converged':'尚未收敛','not_converged':'尚未收敛'})[value]??value;}
-function contextualHref(asset:AssetVersion):string {return assetHref(asset.spaceId,asset.id)+(asset.source.kind==='node'?`?run=${encodeURIComponent(asset.source.runId)}`:'');}
+function contextualHref(asset:AssetVersion):string {return assetHref(asset.spaceId,asset.id)+(isRunAssetSource(asset.source)?`?run=${encodeURIComponent(asset.source.runId)}`:'');}
 /** Exact-parent fragment locator, never a cross-version item identity. */
 export function fragmentAnchor(pointer:string):string {
   // Encode every non-alphanumeric character to avoid collisions with separators.
@@ -76,7 +77,7 @@ export function assetReading(asset:AssetVersion,options:ReadingOptions={}):{titl
     if(view?.reader&&!reader) throw new Error('Reader unavailable');
     if(reader) {
       const reading=reader(asset);
-      const markup=reading.sections.map(item=>`<section${item.pointer?` id="${e(fragmentAnchor(item.pointer))}"`:""}><h2>${e(item.title)}</h2>${paragraphs(item.text)}${item.sourceRefs?.length?`<aside class="source-evidence"><h3>本结论的依据</h3>${item.sourceRefs.map(ref=>{const source=options.sources?.find(value=>value.ref===ref);return `<p>${source?.resolved&&source.assetVersionId?`<a href="${e(sourceHref(asset.spaceId,source,options.runContext??(asset.source.kind==='node'?{runId:asset.source.runId,caseId:''}:undefined)))}">${e(source.label)}</a>`:`${e(source?.label??ref)} · 来源未解析`}</p>${source?.excerpt?`<details><summary>查看原始片段</summary>${paragraphs(source.excerpt)}</details>`:''}`;}).join('')}</aside>`:''}</section>`);
+      const markup=reading.sections.map(item=>`<section${item.pointer?` id="${e(fragmentAnchor(item.pointer))}"`:""}><h2>${e(item.title)}</h2>${paragraphs(item.text)}${item.sourceRefs?.length?`<aside class="source-evidence"><h3>本结论的依据</h3>${item.sourceRefs.map(ref=>{const source=options.sources?.find(value=>value.ref===ref);return `<p>${source?.resolved&&source.assetVersionId?`<a href="${e(sourceHref(asset.spaceId,source,options.runContext??(isRunAssetSource(asset.source)?{runId:asset.source.runId,caseId:''}:undefined)))}">${e(source.label)}</a>`:`${e(source?.label??ref)} · 来源未解析`}</p>${source?.excerpt?`<details><summary>查看原始片段</summary>${paragraphs(source.excerpt)}</details>`:''}`;}).join('')}</aside>`:''}</section>`);
       return {title:reading.title,label:view?.label??reading.title,body:`<div class="prose">${options.compactSections&&markup.length>options.compactSections?markup.slice(0,options.compactSections).join('')+`<details><summary>阅读完整意见</summary>${markup.slice(options.compactSections).join('')}</details>`:markup.join('')}</div>`};
     }
     if(view) {
@@ -121,7 +122,7 @@ export async function caseBody(model:SpaceWorkbench,item:WorkbenchCase,run:Workb
   } else if(tab==='process') body=(await Promise.all(run.process.map(async stage=>`<section><h2>${e(stage.label)}</h2>${assetCard(stage.asset,await reading(stage.asset))}${(await Promise.all(stage.assessments.map(async asset=>assetCard(asset,await reading(asset))))).join('')}</section>`))).join('')||'<p class="empty">暂无过程记录</p>';
   else if(tab==='compare') {
     const assets=[...run.process.map(stage=>stage.asset),...item.runs.flatMap(value=>value.primary?[value.primary]:[])].filter(asset=>!run.primary||asset.schema.namespace===run.primary.schema.namespace&&asset.schema.revision===run.primary.schema.revision&&asset.schema.hash===run.primary.schema.hash);
-    const names=Object.fromEntries(await Promise.all(assets.map(async asset=>{const owner=item.runs.find(value=>value.binding.runId===(asset.source.kind==='node'?asset.source.runId:''));const stage=owner?.process.find(stage=>stage.asset.id===asset.id);const view=assetReading(asset,await reading(asset));return [asset.id,`第 ${owner?.number??'?'} 次运行 · ${stage?.label??'候选结果'} · ${view.title}`];})));
+    const names=Object.fromEntries(await Promise.all(assets.map(async asset=>{const owner=item.runs.find(value=>value.binding.runId===(isRunAssetSource(asset.source)?asset.source.runId:''));const stage=owner?.process.find(stage=>stage.asset.id===asset.id);const view=assetReading(asset,await reading(asset));return [asset.id,`第 ${owner?.number??'?'} 次运行 · ${stage?.label??'候选结果'} · ${view.title}`];})));
     body=`<p>同一运行内比较产物：观察修改是否落实。两次运行比较结果：同时检查输入、方法和配置条件。</p>${comparisonForm(model.data.space.id,assets,names)}<p class="muted">没有基线或评价时，不推断质量改善。</p>`;
   } else body=`<h2>本次输入与实际配置</h2><details><summary>冻结输入与配置证据</summary>${json(run.binding)}</details><h2>生产记录</h2>${sessions.map(session=>`<p><a href="${root(model.data.space.id)}/sessions/${encodeURIComponent(session.sessionId)}">${e(session.label)}</a></p>`).join('')||'<p class="muted">暂无会话记录</p>'}${extraEvidence}`;
   return header+intro+body;
@@ -153,7 +154,7 @@ function compareSection(section:PresentationComparisonSection,left:unknown,right
 }
 export function comparisonBody(comparison:AssetComparison|undefined,left:AssetVersion,right:AssetVersion,leftOptions:ReadingOptions,rightOptions:ReadingOptions):string {
   const identity=(asset:AssetVersion,options:ReadingOptions,label:string)=>{
-    const view=assetReading(asset,options),runId=asset.source.kind==='node'?asset.source.runId:'未绑定运行';
+    const view=assetReading(asset,options),runId=isRunAssetSource(asset.source)?asset.source.runId:'未绑定运行';
     return `<article class="card comparison-identity"><h2>${e(label)} · <a href="${e(contextualHref(asset))}">${e(view.title)}</a></h2><p>${e(options.identity?.runLabel??'运行')}：${e(runId)}${options.identity?.roundLabel?' · '+e(options.identity.roundLabel):' · 业务轮次未提供'}</p><p>准确资产版本：${e(asset.id)}</p><p>逻辑资产：${e(asset.assetId)} · 保存版本 ${e(asset.version)}</p></article>`;
   };
   const one=(asset:AssetVersion,options:ReadingOptions)=>{const view=assetReading(asset,options);return `<article class="card"><h2><a href="${e(contextualHref(asset))}">${e(view.title)}</a></h2>${view.body}</article>`;};

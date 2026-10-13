@@ -24,6 +24,19 @@ describe('attempt-bound node reads',()=>{
   expect(tool.parameters).toEqual({type:'object',properties:{slot:{type:'string',enum:['audienceProfile','manuscript'],
    description:'Exact input slot bound to this attempt.'}},required:['slot'],additionalProperties:false});
   expect(tool.description).toContain('audienceProfile, manuscript');
+  expect(tool.outputSchema).toMatchObject({oneOf:[
+   {type:'object',properties:{schema:{type:'object',required:['namespace','revision','hash']},payload:{}},
+    required:['assetVersionId','stateAtBinding','payloadHash','schema','viewVersion','deliveredHash','payload']},
+   {type:'object',properties:{ok:{const:false},error:{properties:{code:{const:'UNBOUND_INPUT_SLOT'}}}}},
+  ]});
+  expect(tool.response).toEqual({success:{kind:'DeliveredInput',source:'NodeClient.read',
+   fields:['assetVersionId','stateAtBinding','payloadHash','schema','viewVersion','deliveredHash','payload']},
+   denial:{ok:false,error:{code:'UNBOUND_INPUT_SLOT',
+    message:'This input slot is not bound to the current attempt. Choose a slot from the tool schema.'}},
+   executionError:{kind:'throws',source:'NodeClient.read',normalized:false}});
+  expect(tool.permissions).toEqual({operation:'read',scope:'persisted-attempt-bound-input',
+   allowedSlots:['audienceProfile','manuscript'],deliveredView:'binding-defined',
+   readFullMethodExposed:false,write:false,webResearch:false});
   for(const value of [{slot:'draft'},{slot:'title'},{slot:'manuscript',extra:true},{slot:4},{}]){
    expect(await tool.execute(value)).toEqual({ok:false,error:{code:'UNBOUND_INPUT_SLOT',
     message:'This input slot is not bound to the current attempt. Choose a slot from the tool schema.'}});

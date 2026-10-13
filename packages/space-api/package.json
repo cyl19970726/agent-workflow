@@ -5,10 +5,13 @@
   "type": "module",
   "exports": {
     "./contracts": {"types": "./dist/contracts.d.ts", "import": "./dist/contracts.js"},
-    "./server": {"types": "./dist/server.d.ts", "import": "./dist/server.js"}
+    "./server": {"types": "./dist/server.d.ts", "import": "./dist/server.js"},
+    "./workbench-server": {"types": "./dist/workbench-server.d.ts", "import": "./dist/workbench-server.js"},
+    "./design-workbench": {"types": "./dist/design-workbench.d.ts", "import": "./dist/design-workbench.js"},
+    "./workbench-credentials": {"types": "./dist/workbench-credentials.d.ts", "import": "./dist/workbench-credentials.js"}
   },
   "files": ["dist"],
   "engines": {"node": ">=24"},
   "scripts": {"build": "tsc -p tsconfig.json"},
-  "dependencies": {"@signal-room/workflow-spaces": "0.1.0", "zod": "^4.1.0"}
+  "dependencies": {"@signal-room/workflow": "0.1.0", "@signal-room/workflow-spaces": "0.1.0", "zod": "^4.1.0"}
 }

@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createSpaceConsole, type AssetReader, type SpaceConsoleService } from './console.js';
 import type { AssetVersion, Review, SpaceOverview, SpaceRun } from './types.js';
+import {isRunAssetSource} from './types.js';
 import type { BusinessPresentationAdapter, WorkbenchRun } from './workbench-model.js';
 import type { WorkflowMethodHost } from './method-workbench.js';
 import { methodPath, methodPreviewBody } from './method-render.js';
@@ -109,7 +110,7 @@ function fieldsHtml(fields: InteractiveFormField[]): string {
 }
 
 function deliverables(data: SpaceOverview, host: InteractiveWorkflowHost, run?: SpaceRun): SpaceOverview['assets'] {
-  return data.assets.filter(asset => asset.source.kind === 'node' && (!run || asset.source.runId === run.runId) && host.isDeliverable(asset))
+  return data.assets.filter(asset => isRunAssetSource(asset.source) && (!run || asset.source.runId === run.runId) && host.isDeliverable(asset))
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 }
 
@@ -117,11 +118,11 @@ function reviewsFor(data: SpaceOverview, assetId: string): Review[] {
   return data.reviews.filter(review => review.assetVersionIds.includes(assetId));
 }
 function nodeRunId(asset: AssetVersion): string | undefined {
-  return asset.source.kind === 'node' ? asset.source.runId : undefined;
+  return isRunAssetSource(asset.source) ? asset.source.runId : undefined;
 }
 
 function reviewForm(caseId: string, data: SpaceOverview, host: InteractiveWorkflowHost, asset: SpaceOverview['assets'][number], token: string): string {
-  if (asset.source.kind !== 'node') return '';
+  if (!isRunAssetSource(asset.source)) return '';
   const run = data.runs.find(item => item.runId === nodeRunId(asset));
   if (!run || run.caseId !== caseId) return '';
   const baselines = deliverables(data, host).filter(item => item.id !== asset.id && nodeRunId(item) !== run.runId && data.runs.some(value => value.runId === nodeRunId(item) && value.caseId === caseId));
@@ -444,7 +445,7 @@ export function createInteractiveSpaceConsole(service: SpaceConsoleService, opti
           if (baselineRunId) {
             const baselineRun = data.runs.find(run => run.runId === baselineRunId && run.caseId === caseId);
             const baselineReview = data.reviews.find(review => review.id === baselineReviewId && review.runId === baselineRunId);
-            const baselineAsset = data.assets.find(asset => baselineReview?.assetVersionIds.includes(asset.id) && host.isDeliverable(asset) && asset.source.kind === 'node' && asset.source.runId === baselineRunId);
+            const baselineAsset = data.assets.find(asset => baselineReview?.assetVersionIds.includes(asset.id) && host.isDeliverable(asset) && isRunAssetSource(asset.source) && asset.source.runId === baselineRunId);
             if (!baselineRun || !baselineReview || !baselineAsset) throw new FormError(400, '比较基线不属于本案例旧运行');
             baselineAssetVersionId = baselineAsset.id;
           }
@@ -462,7 +463,7 @@ export function createInteractiveSpaceConsole(service: SpaceConsoleService, opti
           const runId = required(form, 'runId'), assetVersionId = required(form, 'assetVersionId');
           const run = data.runs.find(item => item.runId === runId && item.caseId === caseId);
           const asset = data.assets.find(item => item.id === assetVersionId && host.isDeliverable(item));
-          if (!run || asset?.source.kind !== 'node' || asset.source.runId !== runId) throw new FormError(400, '评价对象不属于本案例运行');
+          if (!run || !asset || !isRunAssetSource(asset.source) || asset.source.runId !== runId) throw new FormError(400, '评价对象不属于本案例运行');
           const state = await host.runStatus(runId);
           if (state.reviewableAssetVersionId !== undefined && state.reviewableAssetVersionId !== assetVersionId) throw new FormError(409, '这份结果尚不是可评价的本次最终结果');
           const baselineReviewId = optional(form, 'baselineReviewId');

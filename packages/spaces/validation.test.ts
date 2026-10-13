@@ -3,7 +3,7 @@ import {Pool} from 'pg';
 import {afterAll,beforeAll,describe,expect,it} from 'vitest';
 import {JSON_SCHEMA_DIALECT} from '@signal-room/workflow-space-contracts';
 import {artifactPayloadSha256} from '@signal-room/workflow';
-import {SiwcResponsesRunner} from '../agent-sdk/src/responses.js';
+import {OpenAIAgentsSdkRunner} from '../agent-sdk/src/responses.js';
 import {PostgresBlobStore} from './blob-store.js';
 import {migrateWorkflowSpaces} from './migration.js';
 import {WorkflowSpaceService} from './service.js';
@@ -137,7 +137,7 @@ suite('frozen validation evidence',()=>{
       const judge=await f.service.startNode(f.space.id,{runId:run.runId,nodeId:'judge-A',key:'evaluate',inputs:{subject:asset.id},producer:'agent',instructions:'Judge independent report',effectiveConfig:{model:'mimo-test'}});
       const judgeClient=await f.service.nodeClient(f.space.id,judge.id);
       await judgeClient.read('subject');
-      const runner=new SiwcResponsesRunner({auth:{accessToken:async()=>'test-token'},
+      const runner=new OpenAIAgentsSdkRunner({auth:{accessToken:async()=>'test-token'},
         fetch:async()=>new Response(`data: ${JSON.stringify({type:'response.completed',response:{output:[{type:'message',content:[{type:'output_text',text:'Observed assessment'}]}]}})}\n\n`,
           {headers:{'content-type':'text/event-stream'}})});
       let eventNumber=0;

@@ -1,5 +1,6 @@
 import type { SpaceConsoleService } from './console.js';
 import type { AssetVersion, Review, SpaceCase, SpaceOverview, SpaceRun } from './types.js';
+import {isRunAssetSource} from './types.js';
 
 export type ReadableAsset = AssetVersion & {state:string};
 export interface BusinessRunResolution {
@@ -28,7 +29,7 @@ export interface SpaceWorkbench {data:SpaceOverview;cases:WorkbenchCase[]}
 function exactAsset(data:SpaceOverview,id:string,run?:SpaceRun):ReadableAsset {
   const asset=data.assets.find(value=>value.id===id && value.spaceId===data.space.id);
   if(!asset) throw new Error('Presentation relation is outside the authorized Space');
-  if(run && (asset.source.kind!=='node'||asset.source.runId!==run.runId)) throw new Error('Presentation result is outside the exact run');
+  if(run && (!isRunAssetSource(asset.source)||asset.source.runId!==run.runId)) throw new Error('Presentation result is outside the exact run');
   return asset;
 }
 function assessment(data:SpaceOverview,id:string,target:ReadableAsset,run:SpaceRun):ReadableAsset {
@@ -39,10 +40,10 @@ function assessment(data:SpaceOverview,id:string,target:ReadableAsset,run:SpaceR
 export function resolveWorkbenchRun(data:SpaceOverview,run:SpaceRun,number:number,resolved:BusinessRunResolution):WorkbenchRun {
   if(run.spaceId!==data.space.id || !data.runs.some(value=>value.runId===run.runId && value.caseId===run.caseId)) throw new Error('Run is outside the authorized Space');
   const primary=resolved.primaryAssetVersionId?exactAsset(data,resolved.primaryAssetVersionId,run):undefined;
-  const runDependencies=new Set(data.assets.filter(asset=>asset.source.kind==='node'&&asset.source.runId===run.runId).flatMap(asset=>asset.dependencies));
+  const runDependencies=new Set(data.assets.filter(asset=>isRunAssetSource(asset.source)&&asset.source.runId===run.runId).flatMap(asset=>asset.dependencies));
   const supporting=(resolved.supportingAssetVersionIds??[]).map(id=>{
     const asset=exactAsset(data,id);
-    if(!(asset.source.kind==='node'&&asset.source.runId===run.runId)&&!runDependencies.has(id))throw new Error('Supporting relation is outside this run and its frozen dependencies');
+    if(!(isRunAssetSource(asset.source)&&asset.source.runId===run.runId)&&!runDependencies.has(id))throw new Error('Supporting relation is outside this run and its frozen dependencies');
     return asset;
   });
   const assessments=(resolved.assessmentAssetVersionIds??[]).map(id=>{
@@ -63,7 +64,7 @@ export async function getSpaceWorkbench(service:SpaceConsoleService,spaceId:stri
     const bindings=data.runs.filter(run=>run.caseId===item.id);
     const runs=await Promise.all(bindings.map(async(run,index)=>resolveWorkbenchRun(data,run,index+1,
       adapter?await adapter.resolveRun({data,run}):{state:'recorded',progress:'此流程尚未配置结果角色；可阅读过程资产与执行证据。',
-        process:data.assets.filter(asset=>asset.source.kind==='node'&&asset.source.runId===run.runId).map(asset=>({label:'过程产物',assetVersionId:asset.id,assessmentAssetVersionIds:[]}))})));
+        process:data.assets.filter(asset=>isRunAssetSource(asset.source)&&asset.source.runId===run.runId).map(asset=>({label:'过程产物',assetVersionId:asset.id,assessmentAssetVersionIds:[]}))})));
     runs.sort((left,right)=>left.startedAt&&right.startedAt?left.startedAt.localeCompare(right.startedAt):left.number-right.number);
     runs.forEach((run,index)=>{run.number=index+1;});
     // Adoption heads are append-only decisions. They are never inferred from an internal verdict.
@@ -72,7 +73,7 @@ export async function getSpaceWorkbench(service:SpaceConsoleService,spaceId:stri
     const acceptedAssets=[...heads.values()].filter(value=>value.target.kind==='asset').flatMap(value=>{
       const asset=exactAsset(data,value.target.id);
       const source=asset.source;
-      return source.kind==='node'&&bindings.some(run=>run.runId===source.runId)?[asset]:[];
+      return isRunAssetSource(source)&&bindings.some(run=>run.runId===source.runId)?[asset]:[];
     });
     return {case:item,runs,acceptedAssets};
   }));
@@ -116,7 +117,7 @@ export interface AssetComparison {
 }
 export function compareWorkbenchAssets(data:SpaceOverview,leftId:string,rightId:string,mode?:AssetComparison['mode']):AssetComparison {
   const left=exactAsset(data,leftId),right=exactAsset(data,rightId);
-  const runFor=(asset:ReadableAsset)=>asset.source.kind==='node'?data.runs.find(run=>run.runId===(asset.source as {runId:string}).runId):undefined;
+  const runFor=(asset:ReadableAsset)=>{const source=asset.source;return isRunAssetSource(source)?data.runs.find(run=>run.runId===source.runId):undefined;};
   const leftRun=runFor(left),rightRun=runFor(right);
   if(!leftRun||!rightRun||leftRun.caseId!==rightRun.caseId) throw new Error('Comparison requires two exact results from the same case');
   const actualMode=leftRun.runId===rightRun.runId?'within-run':'between-runs';

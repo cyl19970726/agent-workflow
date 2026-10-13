@@ -28,6 +28,19 @@ const secured={origin:'http://workbench.test',csrfToken:'session-token',verifyCs
 const postHeaders={authorization:'alice',origin:'http://workbench.test','x-space-csrf':'session-token','content-type':'application/json'};
 
 describe('validation plan API',()=>{
+  it('awaits asynchronous availability in entry detail and blocks plan start preflight',async()=>{
+    let starts=0;
+    const {url}=await serve({host:{availability:async versionId=>{expect(versionId).toBe('v1');return {state:'unavailable',reason:'Frozen release is missing'};},
+      commandSecurity:secured,commands:{entryActions:async()=>({start:false,resume:false,reason:'Frozen release is missing',resumeTarget:null}),
+        startPlanEntry:async()=>{starts++;throw Error('start must not run');},dispatchRun:async()=>{throw Error('unused');}}}});
+    const detail=await fetch(url+root,{headers:{authorization:'alice'}});
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({availability:{state:'unavailable',reason:'Frozen release is missing'}});
+    const response=await fetch(`${url}${root}/attempts/1/start`,{method:'POST',headers:postHeaders,body:JSON.stringify({inputManifestId:'manifest'})});
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({error:{code:'UNAVAILABLE'}});
+    expect(starts).toBe(0);
+  });
   it('reads the exact frozen entry and manifest with bounded safe queue data',async()=>{
     const service={executionTasks:async()=>[{spaceId:'space',runId:'unlinked',workflowVersionId:'v1',entrypoint:'content',inputManifestId:'manifest',caseId:'case',executorKey:'runner',status:'queued',owner:'secret-owner',claimToken:'SECRET_CLAIM',createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z'}]};
     const {url}=await serve({service:service as Partial<WorkflowSpaceService>});
