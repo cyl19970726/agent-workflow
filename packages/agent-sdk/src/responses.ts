@@ -40,6 +40,66 @@ function safeProviderFailure(eventType: string, response: Response, event: {
   return result;
 }
 
+type TransportPhase = "fetch" | "stream";
+const RETRYABLE_TRANSPORT_CODES = new Set(["UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT", "SIWC_HEADER_TIMEOUT", "SIWC_STREAM_IDLE_TIMEOUT", "SIWC_STREAM_PREMATURE_EOF"]);
+const DIAGNOSTIC_TRANSPORT_CODES = new Set([...RETRYABLE_TRANSPORT_CODES, "ENOTFOUND", "EHOSTUNREACH",
+  "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT"]);
+const MAX_SERVER_RETRY_DELAY_MS = 2_000;
+const DEFAULT_ACTIVITY_TIMEOUT_MS = 180_000;
+const STREAM_PROGRESS_INTERVAL_MS = 15_000;
+function activityTimeout(code: "SIWC_HEADER_TIMEOUT" | "SIWC_STREAM_IDLE_TIMEOUT"): Error & { code: string } {
+  return Object.assign(new Error(code), { code });
+}
+class SiwcTransportFailure extends Error {
+  constructor(readonly phase: TransportPhase, readonly original: unknown, readonly status?: number,
+    readonly requestId?: string, readonly bytesRead = 0, readonly emittedText = false) {
+    super("SIWC transport failed", { cause: original });
+  }
+}
+function transportCode(error: unknown): string | undefined {
+  const value = error as { code?: unknown; cause?: { code?: unknown } } | null;
+  const code = value?.code ?? value?.cause?.code;
+  return typeof code === "string" && DIAGNOSTIC_TRANSPORT_CODES.has(code) ? code : undefined;
+}
+function transportErrorName(error: unknown): string | undefined {
+  const name = (error as { name?: unknown } | null)?.name;
+  return name === "TypeError" || name === "Error" || name === "AbortError" ? name : undefined;
+}
+function retryableTransport(failure: SiwcTransportFailure): boolean {
+  const name = transportErrorName(failure.original);
+  if (name === "AbortError" || failure.emittedText) return false;
+  if (RETRYABLE_TRANSPORT_CODES.has(transportCode(failure.original) ?? "")) return true;
+  const message = (failure.original as { message?: unknown } | null)?.message;
+  return name === "TypeError" && (message === "terminated" || message === "fetch failed");
+}
+function serverRetryDelay(headers: Headers): number | undefined {
+  if (headers.get("x-should-retry")?.trim().toLowerCase() === "false") return undefined;
+  const millis = headers.get("retry-after-ms")?.trim();
+  const retryAfter = headers.get("retry-after")?.trim();
+  let delay = 500;
+  if (millis && /^\d+(?:\.\d+)?$/.test(millis)) delay = Number(millis);
+  else if (retryAfter) {
+    if (/^\d+(?:\.\d+)?$/.test(retryAfter)) delay = Number(retryAfter) * 1_000;
+    else {
+      const date = Date.parse(retryAfter);
+      if (Number.isFinite(date)) delay = Math.max(0, date - Date.now());
+    }
+  }
+  return Number.isFinite(delay) && delay <= MAX_SERVER_RETRY_DELAY_MS ? delay : undefined;
+}
+async function waitForRetry(delayMs: number, signals: readonly (AbortSignal | undefined)[]): Promise<void> {
+  const signal = AbortSignal.any(signals.filter((item): item is AbortSignal => item !== undefined));
+  signal.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, delayMs);
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error("Agent run canceled")); };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
+
 export interface SiwcTool {
   name: string;
   description: string;
@@ -61,7 +121,7 @@ export interface SiwcVisualToolResult {
 }
 
 export interface SiwcRunnerOptions {
-  auth: Pick<SiwcAuth, "accessToken">;
+  auth: Pick<SiwcAuth, "accessToken"> & Partial<Pick<SiwcAuth, "refreshAfterUnauthorized">>;
   /** Tool set is supplied by the harness for this exact attempt; definitions cannot grant tools. */
   tools?: (request: AgentRunRequest<unknown>) => readonly SiwcTool[] | Promise<readonly SiwcTool[]>;
   /** Optional, attempt-bound visual inputs. The selected SIWC model must support images. */
@@ -71,13 +131,19 @@ export interface SiwcRunnerOptions {
   /** Opt into Responses JSON object mode for JSON outputs; other consumers retain legacy parsing. */
   enforceJsonObject?: boolean;
   timeoutMs?: number;
+  /** Maximum wait for response headers on each POST; defaults to 180 seconds. */
+  headerTimeoutMs?: number;
+  /** Maximum gap between response stream chunks; defaults to 180 seconds. */
+  streamIdleTimeoutMs?: number;
   validateOutput?: (output: unknown, request: AgentRunRequest<unknown>) => unknown | Promise<unknown>;
   /** Optional same-session technical correction; omitted consumers retain fail-fast behavior. */
   maxOutputValidationCorrections?: number;
   /** Only this callback may supply safe, structured validation values for durable trace events. */
   outputValidationFeedback?: (error: unknown, request: AgentRunRequest<unknown>) => string | SiwcValidationFeedback | null | Promise<string | SiwcValidationFeedback | null>;
-  /** Durable aggregate reservation gate, invoked after the request event and immediately before every provider POST. */
+  /** Durable aggregate reservation gate, invoked before the request event and every provider POST. */
   beforeRequest?: (input:{request:AgentRunRequest<unknown>;turn:number;kind:'original'|'tool-continuation'|'technical-repair'})=>Promise<void>;
+  /** Optional validated draft tools whose sole passing receipt can end the SDK loop. */
+  finishOnPassingDraftTools?: readonly string[];
   fetch?: typeof fetch;
 }
 
@@ -101,6 +167,10 @@ export class OpenAIAgentsSdkRunner implements AgentRunner {
     const corrections = options.maxOutputValidationCorrections ?? 0;
     if (!Number.isSafeInteger(corrections) || corrections < 0 || corrections > 3) throw new Error("Invalid SIWC maxOutputValidationCorrections");
     this.maxOutputValidationCorrections = corrections;
+    for (const [name, value] of [["headerTimeoutMs", options.headerTimeoutMs],
+      ["streamIdleTimeoutMs", options.streamIdleTimeoutMs]] as const) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) throw new Error(`Invalid SIWC ${name}`);
+    }
   }
 
   async run<Input, Output>(request: AgentRunRequest<Input>): Promise<AgentRunResult<Output>> {
@@ -120,7 +190,6 @@ export class OpenAIAgentsSdkRunner implements AgentRunner {
 
   private async runWithSignal<Input, Output>(request: AgentRunRequest<Input>): Promise<AgentRunResult<Output>> {
     if (request.signal.aborted) throw request.signal.reason ?? new Error("Agent run canceled");
-    const token = await awaitWithAbort(request.signal, () => this.options.auth.accessToken());
     const tools = [...(await awaitWithAbort(request.signal, () => this.options.tools?.(request as AgentRunRequest<unknown>) ?? []) ?? [])];
     const names = new Set<string>();
     for (const tool of tools) {
@@ -207,18 +276,108 @@ export class OpenAIAgentsSdkRunner implements AgentRunner {
         const body = { model: request.definition.model, input, instructions: modelRequest.systemInstructions,
           reasoning: { effort }, store: false, stream: true,
           ...(jsonObjectMode ? { text: { format: { type: "json_object" as const } } } : {}) };
-        await request.emit("siwc.request", { ...SDK_RUNTIME, turn: turns, inputItems: input.length });
-        await awaitWithAbort(request.signal, () => this.options.beforeRequest?.({ request: request as AgentRunRequest<unknown>, turn: turns, kind: nextKind }));
-        request.signal.throwIfAborted();
-        const response = await this.http(RESPONSES_URL, { method: "POST", signal: modelRequest.signal ?? request.signal, headers: {
-          "authorization": `Bearer ${token}`, "content-type": "application/json", "accept": "text/event-stream",
-        }, body: JSON.stringify(body) });
-        if (!response.ok) {
+        let completed: Completed | undefined;
+        let requestAttempt = 0;
+        let retryBudgetUsed = 0;
+        let authRetry = 0;
+        let refreshedToken: string | undefined;
+        const handleTransportFailure = async (error: SiwcTransportFailure): Promise<void> => {
+          request.signal.throwIfAborted();
+          modelRequest.signal?.throwIfAborted();
+          const code = transportCode(error.original);
+          const name = transportErrorName(error.original);
+          const retrying = retryBudgetUsed < 1 && retryableTransport(error);
+          await request.emit("siwc.transport_error", { turn: turns, requestAttempt, phase: error.phase,
+            retrying, ...(name ? { errorName: name } : {}), ...(code ? { causeCode: code } : {}),
+            ...(error.status ? { status: error.status } : {}),
+            ...(error.requestId ? { requestId: error.requestId } : {}), bytesRead: error.bytesRead });
+          if (!retrying) throw new Error(`SIWC_TRANSPORT_FAILURE:${error.phase}:${code ?? "unknown"}`, { cause: error.original });
+          retryBudgetUsed++;
+        };
+        while (!completed) {
+          request.signal.throwIfAborted();
+          modelRequest.signal?.throwIfAborted();
+          // Authentication and the aggregate gate are independent of transport retry. The gate
+          // runs before every actual POST, including the one after a 401 or a broken stream.
+          let token: string;
+          try { token = refreshedToken ?? await awaitWithAbort(request.signal, () => this.options.auth.accessToken()); }
+          catch (error) {
+            await request.emit("siwc.pre_request_error", { turn: turns, phase: "auth",
+              ...(transportErrorName(error) ? { errorName: transportErrorName(error) } : {}),
+              ...(safeField((error as { code?: unknown } | null)?.code) ?
+                { causeCode: safeField((error as { code?: unknown }).code) } : {}) });
+            throw error;
+          }
+          refreshedToken = undefined;
+          try { await awaitWithAbort(request.signal, () => this.options.beforeRequest?.({ request: request as AgentRunRequest<unknown>, turn: turns, kind: nextKind })); }
+          catch (error) {
+            await request.emit("siwc.pre_request_error", { turn: turns, phase: "gate",
+              ...(transportErrorName(error) ? { errorName: transportErrorName(error) } : {}) });
+            throw error;
+          }
+          request.signal.throwIfAborted();
+          requestAttempt++;
+          await request.emit("siwc.request", { ...SDK_RUNTIME, turn: turns, inputItems: input.length, requestAttempt });
+          let response: Response;
+          const headerController = new AbortController();
+          const headerSignal = AbortSignal.any([request.signal, modelRequest.signal, headerController.signal]
+            .filter((signal): signal is AbortSignal => signal !== undefined));
+          const sentAt = Date.now();
+          const headerTimer = setTimeout(() => headerController.abort(activityTimeout("SIWC_HEADER_TIMEOUT")),
+            this.options.headerTimeoutMs ?? DEFAULT_ACTIVITY_TIMEOUT_MS);
+          try {
+            response = await awaitWithAbort(headerSignal, () => this.http(RESPONSES_URL, { method: "POST", signal: headerSignal, headers: {
+              "authorization": `Bearer ${token}`, "content-type": "application/json", "accept": "text/event-stream",
+            }, body: JSON.stringify(body) }));
+          } catch (error) {
+            await handleTransportFailure(new SiwcTransportFailure("fetch", error));
+            if (authRetry > 0) refreshedToken = token;
+            continue;
+          } finally { clearTimeout(headerTimer); }
           const requestId = safeField(response.headers.get("x-request-id"), /^[a-zA-Z0-9_-]{1,128}$/);
-          await request.emit("siwc.provider_error", { eventType: "http.error", status: response.status, ...(requestId ? { requestId } : {}) });
-          throw new Error(`SIWC Responses request failed (${response.status}); requestId=${requestId ?? "unknown"}`);
+          await request.emit("siwc.response_headers", { turn: turns, requestAttempt, status: response.status,
+            ...(requestId ? { requestId } : {}), elapsedMs: Date.now() - sentAt });
+          if (!response.ok) {
+            await request.emit("siwc.provider_error", { eventType: "http.error", status: response.status,
+              ...(requestId ? { requestId } : {}) });
+            if (response.status === 401 && authRetry === 0 && this.options.auth.refreshAfterUnauthorized) {
+              await response.body?.cancel().catch(() => undefined);
+              try { refreshedToken = await awaitWithAbort(request.signal, () => this.options.auth.refreshAfterUnauthorized!(token)); }
+              catch (error) {
+                await request.emit("siwc.pre_request_error", { turn: turns, phase: "auth_refresh", status: 401,
+                  ...(requestId ? { requestId } : {}),
+                  ...(transportErrorName(error) ? { errorName: transportErrorName(error) } : {}),
+                  ...(safeField((error as { code?: unknown } | null)?.code) ?
+                    { causeCode: safeField((error as { code?: unknown }).code) } : {}) });
+                throw error;
+              }
+              authRetry++;
+              await request.emit("siwc.auth_refreshed", { reason: "http_401", requestAttempt: requestAttempt + 1 });
+              continue;
+            }
+            const delay = response.status >= 500 && retryBudgetUsed < 1
+              ? serverRetryDelay(response.headers) : undefined;
+            if (delay !== undefined) {
+              retryBudgetUsed++;
+              void response.body?.cancel().catch(() => undefined);
+              await request.emit("siwc.provider_retry", { turn: turns, requestAttempt, status: response.status,
+                ...(requestId ? { requestId } : {}), delayMs: delay });
+              await waitForRetry(delay, [request.signal, modelRequest.signal]);
+              if (authRetry > 0) refreshedToken = token;
+              continue;
+            }
+            throw new Error(`SIWC Responses request failed (${response.status}); requestId=${requestId ?? "unknown"}`);
+          }
+          try { completed = await consumeEvents(response, request, modelRequest.signal,
+            this.options.streamIdleTimeoutMs ?? DEFAULT_ACTIVITY_TIMEOUT_MS,
+            async (bytesRead, eventCount, elapsedMs) => request.emit("siwc.stream_progress", {
+              turn: turns, requestAttempt, bytesRead, eventCount, elapsedMs })); }
+          catch (error) {
+            if (!(error instanceof SiwcTransportFailure)) throw error;
+            await handleTransportFailure(error);
+            if (authRetry > 0) refreshedToken = token;
+          }
         }
-        const completed = await consumeEvents(response, request);
         responseId = completed.id;
         const items = completed.output ?? [];
         const visibleOutput = items.flatMap(item => {
@@ -255,7 +414,24 @@ export class OpenAIAgentsSdkRunner implements AgentRunner {
           output: response.output as StreamEventResponseCompleted["response"]["output"] } };
       }
     };
-    const agent = new Agent({ name: request.definition.id, instructions, model, tools: boundTools });
+    const finishTools = new Set(this.options.finishOnPassingDraftTools ?? []);
+    const agent = new Agent({ name: request.definition.id, instructions, model, tools: boundTools,
+      toolUseBehavior: finishTools.size ? (_context, results) => {
+        const continueRun = { isFinalOutput: false as const, isInterrupted: undefined };
+        if (results.length !== 1 || results[0]?.type !== "function_output" || !finishTools.has(results[0].tool.name))
+          return continueRun;
+        let receipt: unknown;
+        try { receipt = JSON.parse(results[0].output as string); }
+        catch { return continueRun; }
+        if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return continueRun;
+        const row = receipt as { pass?: unknown; draftId?: unknown; sha256?: unknown; errors?: unknown };
+        if (row.pass !== true || typeof row.draftId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(row.draftId) ||
+          typeof row.sha256 !== "string" || !/^[0-9a-f]{64}$/i.test(row.sha256) ||
+          (row.errors !== undefined && (!Array.isArray(row.errors) || row.errors.length !== 0))) return continueRun;
+        return { isFinalOutput: true as const, isInterrupted: undefined,
+          finalOutput: JSON.stringify({ acceptedDraft: { draftId: row.draftId, sha256: row.sha256 } }) };
+      } : "run_llm_again" });
     // Workflow events remain in PostgreSQL. Do not enable an implicit second cloud trace export
     // or the SDK's default API-key provider on this explicitly SIWC-authorized route.
     const runner = new Runner({ tracingDisabled: true, toolExecution: { maxFunctionToolConcurrency: 1 } });
@@ -359,18 +535,33 @@ function isVisualResult(value: Json | SiwcVisualToolResult): value is SiwcVisual
     && value.kind === "siwc_visual_tool_result" && Array.isArray(value.images);
 }
 
-async function consumeEvents<Input>(response: Response, request: AgentRunRequest<Input>): Promise<Completed> {
+async function consumeEvents<Input>(response: Response, request: AgentRunRequest<Input>, modelSignal: AbortSignal | undefined,
+  idleTimeoutMs: number, progress: (bytesRead: number, eventCount: number, elapsedMs: number) => Promise<void>): Promise<Completed> {
   if (!response.body) throw new Error("SIWC response has no stream");
   let buffer = "";
   let complete: Completed | undefined;
   let bytes = 0;
+  let eventCount = 0;
+  const startedAt = Date.now();
+  let lastProgressAt = -Infinity;
+  let emittedText = false;
   const output = new Map<number, ResponseItem>();
   const textDeltas = new Map<string, string>();
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      const idleController = new AbortController();
+      const readSignal = AbortSignal.any([request.signal, modelSignal, idleController.signal]
+        .filter((signal): signal is AbortSignal => signal !== undefined));
+      const idleTimer = setTimeout(() => idleController.abort(activityTimeout("SIWC_STREAM_IDLE_TIMEOUT")), idleTimeoutMs);
+      try { chunk = await awaitWithAbort(readSignal, () => reader.read()); }
+      catch (error) {
+        throw new SiwcTransportFailure("stream", error, response.status,
+          safeField(response.headers.get("x-request-id"), /^[a-zA-Z0-9_-]{1,128}$/), bytes, emittedText);
+      } finally { clearTimeout(idleTimer); }
+      const { value, done } = chunk;
       if (done) break;
       bytes += value.byteLength;
       if (bytes > 16_000_000) throw new Error("SIWC response exceeded stream byte limit");
@@ -385,6 +576,7 @@ async function consumeEvents<Input>(response: Response, request: AgentRunRequest
           output_index?: number; content_index?: number; item_id?: string; item?: ResponseItem;
           code?: unknown; param?: unknown; request_id?: unknown; error?: ProviderFailure;
           response?: Completed & { error?: ProviderFailure; incomplete_details?: { reason?: unknown } } };
+        eventCount++;
         if (event.type === "response.output_item.added" && Number.isInteger(event.output_index) && event.item) {
           output.set(event.output_index!, event.item);
         }
@@ -398,13 +590,14 @@ async function consumeEvents<Input>(response: Response, request: AgentRunRequest
         if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
           const key = `${event.output_index ?? 0}:${event.content_index ?? 0}`;
           textDeltas.set(key, (textDeltas.get(key) ?? "") + event.delta);
+          emittedText = true;
           await request.emit("siwc.text_delta", { text: event.delta });
         }
         if (event.type === "response.output_text.done" && typeof event.text === "string") {
           const key = `${event.output_index ?? 0}:${event.content_index ?? 0}`;
           textDeltas.set(key, event.text);
         }
-        if (event.type === "response.completed") complete = event.response;
+        if (event.type === "response.completed") { complete = event.response; break; }
         if (event.type === "response.failed" || event.type === "response.incomplete" || event.type === "error") {
           const failure = safeProviderFailure(event.type, response, event);
           await request.emit("siwc.provider_error", failure);
@@ -412,9 +605,21 @@ async function consumeEvents<Input>(response: Response, request: AgentRunRequest
           throw new Error(`SIWC ${event.type === "error" ? "stream error" : event.type === "response.failed" ? "response failed" : "response incomplete"}: ${reason}`);
         }
       }
+      const now = Date.now();
+      if (lastProgressAt === -Infinity || now - lastProgressAt >= STREAM_PROGRESS_INTERVAL_MS) {
+        lastProgressAt = now;
+        await progress(bytes, eventCount, now - startedAt);
+      }
+      if (complete) break;
     }
-  } finally { reader.releaseLock(); }
-  if (!complete) throw new Error("SIWC stream ended without response.completed");
+  } finally {
+    // Completion is authoritative; a stalled transport must not delay the SDK's next turn.
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  if (!complete) throw new SiwcTransportFailure("stream", Object.assign(
+    new Error("SIWC_STREAM_PREMATURE_EOF"), { code: "SIWC_STREAM_PREMATURE_EOF" }), response.status,
+    safeField(response.headers.get("x-request-id"), /^[a-zA-Z0-9_-]{1,128}$/), bytes, emittedText);
   if (!complete.output?.length) {
     const assembled = [...output.entries()].sort(([a], [b]) => a - b).map(([index, item]) => {
       if (item.type !== "message" || (Array.isArray(item.content) && item.content.length)) return item;

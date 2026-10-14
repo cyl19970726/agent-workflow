@@ -22,6 +22,29 @@ describe("SiwcAuth", () => {
     expect(saved.profile).toBeUndefined();
   });
 
+  it("refreshes an access token rejected by Responses and reuses a concurrent rotation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "workflow-siwc-test-")); temporary.push(dir);
+    const credentialPath = join(dir, "auth.json");
+    await writeFile(credentialPath, JSON.stringify({ hostId: "urn:uuid:test", profile: { clientId: "oaiapp_test", subject: "subject-1",
+      accessToken: "current-access", refreshToken: "current-refresh", idToken: "id-token",
+      scopes: ["chatgpt.tokens.use.direct"], expiresAt: Date.now() + 60 * 60_000 } }), { mode: 0o600 });
+    let refreshes = 0;
+    const http = vi.fn(async () => {
+      refreshes++;
+      return Response.json({ access_token: "rotated-access", refresh_token: "rotated-refresh", token_type: "Bearer",
+        scope: "openid offline_access resource.invoke chatgpt.tokens.use.direct", expires_in: 3600 });
+    });
+    const auth = new SiwcAuth({ credentialPath, fetch: http as typeof fetch });
+
+    expect(await auth.refreshAfterUnauthorized("current-access")).toBe("rotated-access");
+    // A second process can encounter the same 401 after the first process rotates credentials.
+    expect(await auth.refreshAfterUnauthorized("current-access")).toBe("rotated-access");
+    expect(refreshes).toBe(1);
+    const saved = JSON.parse(await readFile(credentialPath, "utf8"));
+    expect(saved.profile.accessToken).toBe("rotated-access");
+    expect(saved.profile.refreshToken).toBe("rotated-refresh");
+  });
+
   it("rejects a forged ID-token signature", async () => {
     const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const jwk = publicKey.export({ format: "jwk" });
