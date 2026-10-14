@@ -24,6 +24,43 @@ async function serve(override:Partial<WorkflowSpaceService>={},host:Partial<Spac
 afterEach(async()=>Promise.all(active.splice(0).map(server=>new Promise<void>(resolve=>server.close(()=>resolve())))));
 const headers={authorization:'alice'};
 describe('exact UX read projections',()=>{
+  it('permits exact auxiliary run assessment but blocks unknown workflows and cross-Space runs',async()=>{
+    const auxiliaryVersion={...version,entrypoints:{content:{...version.entrypoints.content,workflowId:'post.review'}}};
+    const standard={id:'review-standard',revision:'1',content:'Assess the saved report'};
+    const body={id:'review-aux',runId:'r',assetVersionIds:['a'],standard,judge:{kind:'human' as const,id:'alice'},evidence:[],
+      answers:{good:'Good',bad:'Bad',improvement:'Improve',unresolved:'Unknown'}};
+    let writes=0;
+    const service={readRun:async()=>run,readWorkflowVersion:async()=>auxiliaryVersion,
+      recordReview:async()=>{writes++;return {...body,spaceId:'s',createdAt:'2026-10-14T00:00:00Z'};}} as Partial<WorkflowSpaceService>;
+    const host={scope:{workflowId:'content',auxiliaryWorkflowIds:['post.review'],assessmentWorkflowIds:['post.review'],entrypoint:'content'},
+      reviewStandard:async()=>standard,commandSecurity:{origin:'http://example.test',csrfToken:'csrf',verifyCsrf:async()=>true}} as Partial<SpaceApiHost>;
+    const post=async(url:string)=>fetch(`${url}/runs/r/reviews`,{method:'POST',headers:{...headers,origin:'http://example.test','x-space-csrf':'csrf','content-type':'application/json'},body:JSON.stringify(body)});
+    const allowed=await serve(service,host);
+    expect((await post(allowed.url)).status).toBe(200);expect(writes).toBe(1);
+    const readableOnly=await serve(service,{...host,scope:{workflowId:'content',auxiliaryWorkflowIds:['post.review'],entrypoint:'content'}});
+    expect((await post(readableOnly.url)).status).toBe(409);expect(writes).toBe(1);
+    const unknown=await serve(service,{...host,scope:{workflowId:'content',assessmentWorkflowIds:['post.review'],entrypoint:'content'}});
+    expect((await post(unknown.url)).status).toBe(409);expect(writes).toBe(1);
+    const otherSpace=await serve({...service,readRun:async()=>({...run,spaceId:'other'})} as Partial<WorkflowSpaceService>,host);
+    expect((await post(otherSpace.url)).status).toBe(409);expect(writes).toBe(1);
+  });
+  it('authorizes an exact native run and rejects unbounded event queries',async()=>{
+    const nativeRun={...run,executionMode:'external-host' as const,externalSource:{workspaceId:'native-source',runId:'r'}};
+    let calls=0;
+    const page={runId:'r',executionMode:'external-host' as const,items:[{id:'event-1',seq:1,type:'siwc.response',timestamp:'2026-10-14T00:00:00Z',
+      stepRunId:'step-1',attemptId:'attempt-1',turn:4,requestAttempt:null,httpStatus:null,transport:null,
+      response:{outputItems:1,output:[{type:'function_call',name:'review_tool'}],hasText:false,hasFinalText:false,textHash:null},tool:null}],
+      nextCursor:null,hasMore:false,snapshotAt:'2026-10-14T00:00:00Z',sanitized:true as const,
+      children:[{runId:'child-1',workflowId:'post.review',state:'failed',parentStepRunId:'step-1',binding:'bound' as const}]};
+    const {url,overviews}=await serve({readRun:async()=>nativeRun,nativeRunEvents:async(_space,runId,after,limit)=>{
+      expect([runId,after,limit]).toEqual(['r',0,50]);calls++;return page;
+    }} as Partial<WorkflowSpaceService>);
+    const response=await fetch(`${url}/runs/r/native-events`,{headers});expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({runId:'r',items:[{response:{hasFinalText:false}}],children:[{binding:'bound'}]});
+    expect((await fetch(`${url}/runs/r/native-events?limit=101`,{headers})).status).toBe(400);
+    expect((await fetch(`${url}/runs/other/native-events`,{headers})).status).toBe(409);
+    expect(calls).toBe(1);expect(overviews()).toBe(0);
+  });
   it('projects only the saved execution mode on exact Case run lists and run detail',async()=>{
     const calls:string[]=[];
     const trial=await serve({}, {runExecutionMode:async({spaceId,runId})=>{expect(spaceId).toBe('s');calls.push(runId);return 'research-trial';}});

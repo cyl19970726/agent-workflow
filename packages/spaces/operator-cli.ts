@@ -16,7 +16,7 @@ export interface OperatorCliOptions {
   stderr?: (text: string) => void;
 }
 
-const usage = 'Usage: workflow-space-operator onboarding | space | space-create --file <absolute-request.json> | versions | version <version-id> | node <version-id> <node-id> | cases | case <case-id> | run <run-id> | run-inputs <run-id> | process <run-id> | run-evidence <run-id> [--occurrence <occurrence-id>] [--max-pages <1..10>] [--max-occurrences <1..50>] | occurrence <run-id> <occurrence-id> | runtime <run-id> <occurrence-id> <attempt-id> | occurrence-responses <run-id> <occurrence-id> | trace <run-id> <occurrence-id> | run-trace <run-id> <session-id> | asset <asset-id> | blob-upload --file <absolute-path> --media-type <type> | asset-import --file <request.json> | attachment-download <asset-version-id> <blob-id> --out <absolute-path> | review-subjects <run-id> | observe-response --file <target.json> | observe-asset --file <target.json> | observation <run-id> <receipt-id> | reviews <run-id> | review <run-id> <review-id> | review-save --file <payload.json> | dispositions <run-id> | disposition <run-id> <revision-id> | disposition-save --file <payload.json> | diagnosis <run-id> [revision-id] | diagnoses <run-id> | diagnosis-save --file <payload.json> | understanding [--revision <revision-id>] | understanding-history | understanding-save --file <payload.json> | capability [--revision <revision-id>] | capability-history | capability-prepare --file <absolute-input.json> [--out <absolute-ready.json>] | capability-save --file <absolute-payload.json> | design [--revision <revision-id>] | design-history | design-prepare --file <absolute-input.json> [--out <absolute-ready.json>] | design-save --file <payload.json> | design-definition --revision <revision-id> | execution-state | method-command --file <absolute-command.json> | method-preview --design <revision-id> | method-publish --design <revision-id> --expected <candidate-id> | method-basis <version-id>\nSet WORKFLOW_OPERATOR_BASE_URL and WORKFLOW_OPERATOR_SPACE_ID; optionally set exactly one of WORKFLOW_OPERATOR_TOKEN_FILE, WORKFLOW_OPERATOR_AUTHORIZATION or WORKFLOW_OPERATOR_COOKIE.';
+const usage = 'Usage: workflow-space-operator onboarding | space | space-create --file <absolute-request.json> | versions | version <version-id> | node <version-id> <node-id> | cases | case <case-id> | run <run-id> | run-inputs <run-id> | process <run-id> | run-evidence <run-id> [--occurrence <occurrence-id>] [--max-pages <1..10>] [--max-occurrences <1..50>] | native-events <run-id> [--after <seq>] [--limit <1..100>] | occurrence <run-id> <occurrence-id> | runtime <run-id> <occurrence-id> <attempt-id> | occurrence-responses <run-id> <occurrence-id> | trace <run-id> <occurrence-id> | run-trace <run-id> <session-id> | asset <asset-id> | blob-upload --file <absolute-path> --media-type <type> | asset-import --file <request.json> | attachment-download <asset-version-id> <blob-id> --out <absolute-path> | review-subjects <run-id> | observe-response --file <target.json> | observe-asset --file <target.json> | observation <run-id> <receipt-id> | reviews <run-id> | review <run-id> <review-id> | review-save --file <payload.json> | dispositions <run-id> | disposition <run-id> <revision-id> | disposition-save --file <payload.json> | diagnosis <run-id> [revision-id] | diagnoses <run-id> | diagnosis-save --file <payload.json> | understanding [--revision <revision-id>] | understanding-history | understanding-save --file <payload.json> | capability [--revision <revision-id>] | capability-history | capability-prepare --file <absolute-input.json> [--out <absolute-ready.json>] | capability-save --file <absolute-payload.json> | design [--revision <revision-id>] | design-history | design-prepare --file <absolute-input.json> [--out <absolute-ready.json>] | design-save --file <payload.json> | design-definition --revision <revision-id> | execution-state | method-command --file <absolute-command.json> | method-preview --design <revision-id> | method-publish --design <revision-id> --expected <candidate-id> | method-basis <version-id>\nSet WORKFLOW_OPERATOR_BASE_URL and WORKFLOW_OPERATOR_SPACE_ID; optionally set exactly one of WORKFLOW_OPERATOR_TOKEN_FILE, WORKFLOW_OPERATOR_AUTHORIZATION or WORKFLOW_OPERATOR_COOKIE.';
 const safeConfigKeys = ['stageDeclaration', 'reasoningEffort', 'permissionsRevision', 'timeoutMs', 'webSearchMode', 'whenWebResearchTrue', 'maxRevisions', 'model', 'temperature', 'maxOutputTokens', 'webResearch', 'retryCount', 'executionMode'];
 
 function record(value: unknown, name: string): RecordValue {
@@ -66,6 +66,47 @@ function evidenceArguments(args:readonly string[]):{runId:string;occurrenceId?:s
   }
   return result;
 }
+function nativeArguments(args:readonly string[]):{runId:string;after:number;limit:number}{
+  const runId=id(args[0],'run ID');let after=0,limit=50;const seen=new Set<string>();
+  for(let index=1;index<args.length;index+=2){
+    const flag=args[index],value=args[index+1];
+    if(!flag||!value||seen.has(flag)||!['--after','--limit'].includes(flag)||!/^\d+$/u.test(value))throw new Error(usage);
+    seen.add(flag);const parsed=Number(value);
+    if(!Number.isSafeInteger(parsed)||parsed<(flag==='--limit'?1:0)||parsed>(flag==='--limit'?100:Number.MAX_SAFE_INTEGER))throw new Error(usage);
+    if(flag==='--after')after=parsed;else limit=parsed;
+  }
+  return {runId,after,limit};
+}
+function nativePage(value:unknown,expectedRunId:string):RecordValue{
+  const data=record(value,'native events');
+  if(data.runId!==expectedRunId||!['imported','external-host'].includes(String(data.executionMode))||data.sanitized!==true)
+    throw new Error('Operator API returned unrelated native events');
+  const items=list(data.items,'native event items').map(item=>{
+    const event=record(item,'native event');
+    const response=event.response===null?null:record(event.response,'native response');
+    const transport=event.transport===null?null:record(event.transport,'native transport');
+    const tool=event.tool===null?null:record(event.tool,'native tool');
+    return {id:string(event.id,'native event ID'),seq:count(event.seq,'native event seq'),type:string(event.type,'native event type'),
+      timestamp:string(event.timestamp,'native event timestamp'),stepRunId:nullableString(event.stepRunId,'native step'),
+      attemptId:nullableString(event.attemptId,'native attempt'),turn:event.turn===null?null:count(event.turn,'native turn'),
+      requestAttempt:event.requestAttempt===null?null:count(event.requestAttempt,'native request attempt'),
+      httpStatus:event.httpStatus===null?null:count(event.httpStatus,'native HTTP status'),
+      transport:transport?{phase:nullableString(transport.phase,'native phase'),errorName:nullableString(transport.errorName,'native error name'),
+        causeCode:nullableString(transport.causeCode,'native cause code'),bytesRead:transport.bytesRead===null?null:count(transport.bytesRead,'native bytes'),
+        retrying:transport.retrying===null?null:transport.retrying===true}:null,
+      response:response?{outputItems:response.outputItems===null?null:count(response.outputItems,'native output count'),
+        output:list(response.output,'native output').map(value=>({type:string(value.type,'native output type'),name:nullableString(value.name,'native output name')})),
+        hasText:response.hasText===true,hasFinalText:response.hasFinalText===true,textHash:nullableString(response.textHash,'native text hash')}:null,
+      tool:tool?{name:nullableString(tool.name,'native tool name'),callId:nullableString(tool.callId,'native call ID'),status:nullableString(tool.status,'native tool status')}:null};
+  });
+  const children=list(data.children,'native children').map(item=>({runId:string(item.runId,'native child ID'),
+    workflowId:string(item.workflowId,'native child workflow'),state:string(item.state,'native child state'),
+    parentStepRunId:nullableString(item.parentStepRunId,'native parent step'),
+    binding:item.binding==='bound'?'bound':item.binding==='pending'?'pending':(()=>{throw new Error('Invalid native child binding');})()}));
+  if(children.length>32)throw new Error('Operator API returned too many native children');
+  return {runId:expectedRunId,executionMode:data.executionMode,items,nextCursor:data.nextCursor===null?null:count(data.nextCursor,'native cursor'),
+    hasMore:data.hasMore===true,snapshotAt:string(data.snapshotAt,'native snapshot'),sanitized:true,children};
+}
 
 function preparedSummary(kind:PrepareKind,request:RecordValue,file:string,rechecked:boolean):RecordValue {
   const common={kind,operation:rechecked?'rechecked':'prepared',requestFile:file,
@@ -110,6 +151,7 @@ function version(value: unknown): RecordValue {
   return {
     id: string(data.id, 'version.id'),
     label: string(data.label, 'version.label'),
+    workflowId:optionalString(data.workflowId,'version.workflowId'),methodKind:optionalString(data.methodKind,'version.methodKind'),
     revision: string(data.revision, 'version.revision'),
     createdAt: string(data.createdAt, 'version.createdAt'),
     changeReason: string(data.changeReason, 'version.changeReason'),
@@ -236,7 +278,7 @@ function caseSummary(value:unknown):RecordValue {
 function assetSummary(value:unknown):RecordValue {
   const data=record(value,'asset'),schema=record(data.schema,'asset.schema');
   const sourceKind=string(data.sourceKind,'asset.sourceKind');
-  if(!['import','node','transform'].includes(sourceKind))throw new Error('Invalid asset sourceKind');
+  if(!['import','node','historical-artifact','external-artifact','transform'].includes(sourceKind))throw new Error('Invalid asset sourceKind');
   return {id:string(data.id,'asset.id'),title:string(data.title,'asset.title'),kind:string(data.kind,'asset.kind'),state:string(data.state,'asset.state'),
     createdAt:string(data.createdAt,'asset.createdAt'),schema:{namespace:string(schema.namespace,'asset.schema.namespace'),revision:string(schema.revision,'asset.schema.revision'),hash:string(schema.hash,'asset.schema.hash')},
     sourceKind,runId:nullableString(data.runId,'asset.runId'),caseId:nullableString(data.caseId,'asset.caseId'),versionId:nullableString(data.versionId,'asset.versionId'),
@@ -334,8 +376,8 @@ function observationReceipt(value:unknown):RecordValue {
   const data=record(value,'observation receipt'),observer=record(data.observer,'observation observer');
   if(data.delivery==='published-asset-read'){
     const source=record(data.source,'observation.source');
-    if(source.kind!=='node'&&source.kind!=='historical-artifact')throw new Error('Invalid published asset source');
-    const exactSource=source.kind==='historical-artifact'?{kind:'historical-artifact',runId:string(source.runId,'source.runId'),
+    if(source.kind!=='node'&&source.kind!=='historical-artifact'&&source.kind!=='external-artifact')throw new Error('Invalid published asset source');
+    const exactSource=source.kind==='historical-artifact'||source.kind==='external-artifact'?{kind:source.kind,runId:string(source.runId,'source.runId'),
       stepRunId:string(source.stepRunId,'source.stepRunId'),attemptId:string(source.attemptId,'source.attemptId'),
       artifactId:string(source.artifactId,'source.artifactId'),sourceWorkspaceId:string(source.sourceWorkspaceId,'source.sourceWorkspaceId'),
       originalSha256:string(source.originalSha256,'source.originalSha256'),originalUri:string(source.originalUri,'source.originalUri')}:
@@ -423,7 +465,8 @@ export async function runOperatorCli(argv: readonly string[], options: OperatorC
     const [command, first, second, third, fourth, ...extra] = argv;
     if (command === '--help' || command === '-h') { write(usage); return 0; }
     const evidenceArgs=command==='run-evidence'?evidenceArguments(argv.slice(1)):null;
-    if (!command || (command!=='run-evidence'&&extra.length) || !['onboarding', 'space', 'space-create', 'versions', 'version', 'node', 'cases', 'case', 'run', 'run-inputs', 'process', 'run-evidence', 'occurrence', 'runtime', 'occurrence-responses', 'trace', 'run-trace', 'asset', 'blob-upload', 'asset-import', 'attachment-download', 'review-subjects', 'observe-response', 'observe-asset', 'observation', 'reviews', 'review', 'review-save', 'dispositions', 'disposition', 'disposition-save', 'diagnosis', 'diagnoses', 'diagnosis-save', 'understanding', 'understanding-history', 'understanding-save', 'capability', 'capability-history', 'capability-prepare', 'capability-save', 'design', 'design-history', 'design-prepare', 'design-save', 'design-definition', 'execution-state', 'method-command', 'method-preview', 'method-publish', 'method-basis'].includes(command) ||
+    const nativeArgs=command==='native-events'?nativeArguments(argv.slice(1)):null;
+    if (!command || (!['run-evidence','native-events'].includes(command)&&extra.length) || !['onboarding', 'space', 'space-create', 'versions', 'version', 'node', 'cases', 'case', 'run', 'run-inputs', 'process', 'run-evidence', 'native-events', 'occurrence', 'runtime', 'occurrence-responses', 'trace', 'run-trace', 'asset', 'blob-upload', 'asset-import', 'attachment-download', 'review-subjects', 'observe-response', 'observe-asset', 'observation', 'reviews', 'review', 'review-save', 'dispositions', 'disposition', 'disposition-save', 'diagnosis', 'diagnoses', 'diagnosis-save', 'understanding', 'understanding-history', 'understanding-save', 'capability', 'capability-history', 'capability-prepare', 'capability-save', 'design', 'design-history', 'design-prepare', 'design-save', 'design-definition', 'execution-state', 'method-command', 'method-preview', 'method-publish', 'method-basis'].includes(command) ||
       ((command === 'onboarding' || command === 'space' || command === 'versions' || command === 'cases' || command === 'understanding-history' || command === 'capability-history' || command === 'design-history' || command === 'execution-state') && (first || second || third || fourth)) ||
       ((command === 'version' || command === 'method-basis' || command === 'case' || command === 'run' || command === 'run-inputs' || command === 'process' || command === 'asset' || command === 'review-subjects' || command === 'reviews' || command === 'dispositions' || command === 'diagnoses') && (!first || second || third || fourth)) ||
       (command === 'diagnosis' && (!first || third || fourth)) ||
@@ -678,6 +721,9 @@ export async function runOperatorCli(argv: readonly string[], options: OperatorC
       output={spaceId,case:selected,runs,assets};
     } else if (command === 'run-evidence') {
       output=await collectRunEvidence({get:getRaw,spaceId,...evidenceArgs!,project:{run:runDetail,inputs:inputManifest,process:processReading,occurrence:occurrenceDetail,asset:assetSummary}});
+    } else if (command === 'native-events') {
+      const {runId,after,limit}=nativeArgs!;
+      output={spaceId,...nativePage(await getRaw(`/runs/${encodeURIComponent(runId)}/native-events?after=${after}&limit=${limit}`),runId)};
     } else if (command === 'run' || command === 'run-inputs') {
       const runId=id(first,'run ID');
       const inputs=inputManifest(await get(`/runs/${encodeURIComponent(runId)}/inputs`));

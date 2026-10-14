@@ -207,7 +207,7 @@ export function createRunDiagnosisStore(service:WorkflowSpaceService) {
         if(ref.kind==='asset') {
           const asset=await service.readAsset(spaceId,ref.assetVersionId);
           if(asset.payloadHash!==ref.payloadHash)throw new Error('Diagnosis asset evidence hash mismatch');
-          if(!((asset.source.kind==='node'||asset.source.kind==='historical-artifact')&&asset.source.runId===run.runId)&&!manifestAssets.has(asset.id))
+          if(!((asset.source.kind==='node'||asset.source.kind==='historical-artifact'||asset.source.kind==='external-artifact')&&asset.source.runId===run.runId)&&!manifestAssets.has(asset.id))
             throw new Error('Diagnosis asset evidence is outside the run');
           evidenceAssetIds.add(asset.id);body=asset.payload;
         } else if(ref.kind==='response') {

@@ -17,7 +17,7 @@ export interface PublishedAssetTarget {runId:string;assetVersionId:string;payloa
 export interface ExternalAgentAssetObservationReceipt {
   id:string;assetId:string;payloadHash:string;createdAt:string;
   target:PublishedAssetTarget;
-  source:Extract<AssetSource,{kind:'node'|'historical-artifact'}>;
+  source:Extract<AssetSource,{kind:'node'|'historical-artifact'|'external-artifact'}>;
   observer:{id:string;sessionId:string;servicePrincipalId:string};
   producerNativeSessionIds:string[];
   /** Trusted delivery of a published node asset, not proof of comprehension. */
@@ -67,6 +67,19 @@ const historicalAssetDefinition:SchemaDefinition={namespace:EXTERNAL_AGENT_OBSER
 const historicalAssetFrozen=new SchemaRegistry().registerSchema(historicalAssetDefinition);
 export const EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF:SchemaRef={namespace:historicalAssetFrozen.namespace,
   revision:historicalAssetFrozen.revision,hash:historicalAssetFrozen.hash};
+const externalSourceProperties={...historicalSourceProperties,kind:{const:'external-artifact'}};
+const externalAssetDefinition:SchemaDefinition={namespace:EXTERNAL_AGENT_OBSERVATION_SCHEMA_NAMESPACE,revision:'4',dialect:JSON_SCHEMA_DIALECT,
+  schema:{$schema:JSON_SCHEMA_DIALECT,type:'object',properties:{
+    target:{type:'object',properties:{runId:{type:'string',minLength:1},assetVersionId:{type:'string',minLength:1},payloadHash:{type:'string',minLength:1}},
+      required:['runId','assetVersionId','payloadHash'],additionalProperties:false},
+    source:{type:'object',properties:externalSourceProperties,required:Object.keys(externalSourceProperties),additionalProperties:false},
+    observer:{type:'object',properties:{id:{type:'string',minLength:1},sessionId:{type:'string',minLength:1},servicePrincipalId:{type:'string',minLength:1}},
+      required:['id','sessionId','servicePrincipalId'],additionalProperties:false},
+    producerNativeSessionIds:{type:'array',uniqueItems:true,items:{type:'string',minLength:1}},delivery:{const:'published-asset-read'},
+  },required:['target','source','observer','producerNativeSessionIds','delivery'],additionalProperties:false}};
+const externalAssetFrozen=new SchemaRegistry().registerSchema(externalAssetDefinition);
+export const EXTERNAL_AGENT_EXTERNAL_ASSET_OBSERVATION_SCHEMA_REF:SchemaRef={namespace:externalAssetFrozen.namespace,
+  revision:externalAssetFrozen.revision,hash:externalAssetFrozen.hash};
 
 export function externalAgentObservationReceipt(version:AssetVersion):ExternalAgentObservationReceipt {
   if(version.schema.namespace!==EXTERNAL_AGENT_OBSERVATION_SCHEMA_REF.namespace||
@@ -80,7 +93,8 @@ export function externalAgentObservationReceipt(version:AssetVersion):ExternalAg
   return {id:version.id,assetId:version.assetId,payloadHash:version.payloadHash,createdAt:version.createdAt,...payload};
 }
 export function externalAgentAssetObservationReceipt(version:AssetVersion):ExternalAgentAssetObservationReceipt {
-  const expected=version.schema.revision==='3'?EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF:EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF;
+  const expected=version.schema.revision==='4'?EXTERNAL_AGENT_EXTERNAL_ASSET_OBSERVATION_SCHEMA_REF:
+    version.schema.revision==='3'?EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF:EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF;
   if(version.schema.namespace!==expected.namespace||version.schema.revision!==expected.revision||
     version.schema.hash!==expected.hash||version.source.kind!=='import')
     throw new Error('Asset is not a published asset observation receipt');
@@ -94,10 +108,11 @@ export function createExternalAgentObservationStore(service:WorkflowSpaceService
   return {
     /** Explicit owner setup, never server startup or ordinary reads. */
     async ensure(spaceId:string):Promise<SchemaRef> {
-      const [registered,assetRegistered,historicalRegistered]=await service.registerSchemas(spaceId,[definition,assetDefinition,historicalAssetDefinition]);
+      const [registered,assetRegistered,historicalRegistered,externalRegistered]=await service.registerSchemas(spaceId,[definition,assetDefinition,historicalAssetDefinition,externalAssetDefinition]);
       if(!registered||registered.hash!==EXTERNAL_AGENT_OBSERVATION_SCHEMA_REF.hash||
         !assetRegistered||assetRegistered.hash!==EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF.hash||
-        !historicalRegistered||historicalRegistered.hash!==EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF.hash)
+        !historicalRegistered||historicalRegistered.hash!==EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF.hash||
+        !externalRegistered||externalRegistered.hash!==EXTERNAL_AGENT_EXTERNAL_ASSET_OBSERVATION_SCHEMA_REF.hash)
         throw new Error('External Agent observation schema registration failed');
       return EXTERNAL_AGENT_OBSERVATION_SCHEMA_REF;
     },

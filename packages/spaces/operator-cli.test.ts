@@ -65,6 +65,23 @@ describe('attachment operator CLI',()=>{
 });
 
 describe('read-only operator CLI', () => {
+  it('reads a bounded native ledger page without printing unprojected fields',async()=>{
+    const fetch=vi.fn(async(input:RequestInfo|URL)=>{
+      expect(String(input)).toContain('/runs/run-1/native-events?after=2&limit=1');
+      return Response.json({runId:'run-1',executionMode:'external-host',items:[{id:'event-3',seq:3,type:'siwc.transport_error',
+        timestamp:'2026-10-14T00:00:00Z',stepRunId:'step-1',attemptId:'attempt-1',turn:5,requestAttempt:2,httpStatus:503,
+        transport:{phase:'request',errorName:'FetchError',causeCode:'ECONNRESET',bytesRead:0,retrying:false},response:null,tool:null,
+        rawBody:'private-body'}],nextCursor:null,hasMore:false,snapshotAt:'2026-10-14T00:00:00Z',sanitized:true,
+        children:[{runId:'child-1',workflowId:'post.review',state:'failed',parentStepRunId:'step-1',binding:'bound'}],secret:'private-secret'});
+    }) as typeof globalThis.fetch;
+    const call=cli(fetch,['native-events','run-1','--after','2','--limit','1']);
+    expect(await call.result).toBe(0);
+    expect(JSON.parse(call.stdout.mock.calls[0]![0])).toMatchObject({spaceId:'space-a',runId:'run-1',items:[{turn:5,httpStatus:503}],
+      children:[{runId:'child-1',binding:'bound'}]});
+    expect(call.stdout.mock.calls[0]![0]).not.toContain('private-');
+    expect(await cli(fetch,['native-events','run-1','--limit','101']).result).toBe(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it('merges paged runtime tool calls by call ID and preserves exact attempt coverage',async()=>{
     const common={runId:'run-1',occurrenceId:'occ-1',versionId:'v1',stepRunId:'step-1',attemptId:'attempt-1',contextId:'context-1',sessionId:'session-1',
       frozenPrompt:'Frozen prompt',frozenPromptCoverage:'full',contextInstructions:'Context prompt',contextInstructionsCoverage:'full',effectiveConfig:{model:'model-1',apiKey:'must-not-print'},snapshotAt:'2026-10-10T00:00:00Z',sanitized:true};

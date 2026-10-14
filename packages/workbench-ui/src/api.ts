@@ -9,7 +9,7 @@ import {
   IterationSchema,
   UnderstandingRevisionSchema, UnderstandingRevisionListSchema,
   MethodDesignRevisionSchema, MethodDesignRevisionListSchema, MethodDesignPreviewSchema, MethodDesignDefinitionSchema, MethodDesignPublicationReceiptSchema, MethodDesignBasisSchema,
-  RunSessionEventsSchema, OccurrenceRuntimeSchema,
+  RunSessionEventsSchema, OccurrenceRuntimeSchema, NativeRunEventsSchema,
   RunInputManifestSchema,
   UnpublishedResponsesSchema,
   ReviewSubjectsSchema, RunReviewSchema, RunDispositionRevisionSchema,
@@ -27,7 +27,7 @@ import {
   type IterationDto,
   type UnderstandingRevisionDto, type UnderstandingRevisionRequestDto,
   type MethodDesignRevisionDto, type MethodDesignRevisionRequestDto, type MethodDesignPreviewDto, type MethodDesignDefinitionDto, type MethodDesignPublicationReceiptDto, type MethodDesignBasisDto,
-  type RunSessionEventsDto,
+  type RunSessionEventsDto, type NativeRunEventsDto,
   type RunInputManifestDto,
   type UnpublishedResponsesDto,
   type ReviewSubjectsDto, type RunReviewDto, type RunReviewRequestDto, type RunDispositionRevisionDto, type RunDispositionRequestDto,
@@ -92,12 +92,14 @@ export class SpaceApi {
   }
   caseRuns(id: string, cursor?: string, signal?: AbortSignal): Promise<CursorList<RunSummaryDto>> { return this.get(`/cases/${encoded(id)}/runs${cursor ? `?cursor=${encoded(cursor)}` : ''}`, listSchema(RunSummarySchema), signal); }
   run(id: string, signal?: AbortSignal): Promise<RunDetailDto> { return this.get(`/runs/${encoded(id)}`, RunDetailSchema, signal); }
+  runPublishedAssets(runId: string, cursor?: string, signal?: AbortSignal): Promise<CursorList<AssetSummaryDto>> { return this.get(`/assets?runId=${encoded(runId)}${cursor ? `&cursor=${encoded(cursor)}` : ''}`, listSchema(AssetSummarySchema), signal); }
   runDiagnosis(runId: string, signal?: AbortSignal): Promise<RunDiagnosisRevisionDto | null> { return this.get(`/runs/${encoded(runId)}/diagnosis`, RunDiagnosisRevisionSchema.nullable(), signal); }
   runDiagnoses(runId: string, cursor?: string, signal?: AbortSignal): Promise<CursorList<RunDiagnosisRevisionDto>> { return this.get(`/runs/${encoded(runId)}/diagnoses${cursor ? `?cursor=${encoded(cursor)}` : ''}`, RunDiagnosisRevisionListSchema, signal); }
   runDiagnosisRevision(runId: string, revisionId: string, signal?: AbortSignal): Promise<RunDiagnosisRevisionDto> { return this.get(`/runs/${encoded(runId)}/diagnoses/${encoded(revisionId)}`, RunDiagnosisRevisionSchema, signal); }
   saveRunDiagnosis(runId: string, input: RunDiagnosisRequestDto, csrfToken: string): Promise<RunDiagnosisRevisionDto> { return this.post(`/runs/${encoded(runId)}/diagnoses`, input, csrfToken, RunDiagnosisRevisionSchema); }
   runInputs(id: string, signal?: AbortSignal): Promise<RunInputManifestDto> { return this.get(`/runs/${encoded(id)}/inputs`, RunInputManifestSchema, signal); }
   runSessionEvents(runId: string, sessionId: string, after = 0, signal?: AbortSignal): Promise<RunSessionEventsDto> { return this.get(`/runs/${encoded(runId)}/sessions/${encoded(sessionId)}/events?after=${after}&limit=50`, RunSessionEventsSchema, signal); }
+  nativeRunEvents(runId: string, after = 0, signal?: AbortSignal): Promise<NativeRunEventsDto> { return this.get(`/runs/${encoded(runId)}/native-events?after=${after}&limit=50`, NativeRunEventsSchema, signal); }
   process(id: string, signal?: AbortSignal): Promise<ProcessDto> { return this.get(`/runs/${encoded(id)}/process`, ProcessSchema, signal); }
   occurrence(runId: string, occurrenceId: string, signal?: AbortSignal): Promise<OccurrenceDetailDto> { return this.get(`/runs/${encoded(runId)}/occurrences/${encoded(occurrenceId)}`, OccurrenceDetailSchema, signal); }
   occurrenceRuntime(runId: string, occurrenceId: string, attemptId: string, after = 0, signal?: AbortSignal): Promise<OccurrenceRuntimeDto> { return this.get(`/runs/${encoded(runId)}/occurrences/${encoded(occurrenceId)}/runtime?attemptId=${encoded(attemptId)}&after=${after}&limit=100`, OccurrenceRuntimeSchema, signal); }

@@ -57,17 +57,21 @@ export interface SpaceRun {
   inputManifestId: string; effectiveConfig: Record<string, unknown>; configHash: string;
   process?: { revision: string; hash: string };
   /** Existing ledger evidence copied into this Space; no execution was started by the import. */
-  executionMode?: 'imported';
+  executionMode?: 'imported' | 'external-host';
   historicalSource?: {workspaceId:string;runId:string};
+  /** Native workflow execution performed by an approved external host, never by Space startRun. */
+  externalSource?: {workspaceId:string;runId:string;inputProducerForRunId?:string};
 }
 export type AssetSource =
   | { kind: 'import'; actorId: string; description: string }
   | { kind: 'node'; runId: string; stepRunId: string; attemptId: string; nodeId: string; producer: 'agent' | 'program'; sessionId: string; contextId: string; generatedByContextId?: string }
   | { kind: 'historical-artifact'; runId:string; stepRunId:string; attemptId:string; artifactId:string;
       sourceWorkspaceId:string; originalSha256:string; originalUri:string }
+  | { kind: 'external-artifact'; runId:string; stepRunId:string; attemptId:string; artifactId:string;
+      sourceWorkspaceId:string; originalSha256:string; originalUri:string }
   | { kind: 'transform'; actorId: string; description: string; fromVersionIds: string[]; operation: string };
-export function isRunAssetSource(source:AssetSource):source is Extract<AssetSource,{kind:'node'|'historical-artifact'}> {
-  return source.kind==='node'||source.kind==='historical-artifact';
+export function isRunAssetSource(source:AssetSource):source is Extract<AssetSource,{kind:'node'|'historical-artifact'|'external-artifact'}> {
+  return source.kind==='node'||source.kind==='historical-artifact'||source.kind==='external-artifact';
 }
 export interface BlobManifest { id: string; spaceId: string; sha256: string; size: number; mediaType: string; key: string; /** Absent on historical PostgreSQL manifests. */ backend?: 'r2' }
 export interface AssetVersion {

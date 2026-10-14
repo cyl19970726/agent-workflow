@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
-import type { RunRecord, StepResultCommit, StepResultReceipt, ValidationState } from '@signal-room/workflow';
+import type { ArtifactRef, RunRecord, WorkflowEvent, StepResultCommit, StepResultReceipt, ValidationState } from '@signal-room/workflow';
 import { artifactPayloadSha256, workflowFingerprint } from '@signal-room/workflow';
 import { PostgresWorkflowRunStore } from '@signal-room/workflow-postgres';
+import {projectNativeEvent, type NativeRunEventsPage} from './native-events.js';
 import {
   SchemaRegistry, publishStorageContract, projectBoundInput, validateNodeWrite, assertNodeAction, assertStateTransition,
   ContractValidationError, validateAgentOutput, verifyStorageContract,
@@ -13,7 +14,7 @@ import { InvalidObservedOutputError } from './errors.js';
 import { publishProcessContract } from './process-contract.js';
 import type { HistoricalProcessResolver, ProcessView } from './process-projection.js';
 import { projectProcess } from './process-projection.js';
-import {copyHistoricalRunSet, verifyHistoricalRunSnapshot, type HistoricalRunImportInput} from './history-bridge.js';
+import {copyHistoricalRunSet, syncExternalRunSet, verifyHistoricalRunSnapshot, type HistoricalRunImportInput, type ExternalRunSyncInput} from './history-bridge.js';
 import { insertNodeRelations, validateRelationEvent, validateStoredRelation, persistRelation, queryRelationFacts, type ExplicitRelationEvent, projectRunRelations, type RelationProjection } from './relation.js';
 import { validateWorkflowPresentation, type WorkflowPresentationDraft, type WorkflowPresentation, type PresentationBinding, type ResolvedPresentation } from './presentation.js';
 import type {
@@ -31,7 +32,7 @@ import {METHOD_DESIGN_SCHEMA_NAMESPACE,methodDesignRevision} from './method-desi
 import {METHOD_CAPABILITY_SCHEMA_NAMESPACE,methodCapabilityRevision} from './method-capability.js';
 import {BUSINESS_UNDERSTANDING_ASSET_ID, BUSINESS_UNDERSTANDING_SCHEMA_DEFINITION, BUSINESS_UNDERSTANDING_SCHEMA_REF} from './business-understanding.js';
 import {EXTERNAL_AGENT_OBSERVATION_SCHEMA_REF, EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF,
-  EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF,
+  EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF, EXTERNAL_AGENT_EXTERNAL_ASSET_OBSERVATION_SCHEMA_REF,
   externalAgentObservationAssetId, externalAgentAssetObservationAssetId,
   externalAgentObservationReceipt, externalAgentAssetObservationReceipt,
   type ExternalAgentObservationReceipt, type ExternalAgentAssetObservationReceipt,
@@ -524,6 +525,105 @@ export class WorkflowSpaceService {
       return bindings;
     });
   }
+  /** Bind an actual native run as soon as its source ledger row exists, before the external host invokes a model. */
+  async bindExternalRun(spaceId:string,input:ExternalRunSyncInput & {runs:[ExternalRunSyncInput['runs'][number]]}):Promise<SpaceRun>{
+    return (await this.syncExternalRuns(spaceId,input))[0]!;
+  }
+  private async verifyExternalInputProducer(db:PoolClient,spaceId:string,sourceWorkspaceId:string,
+    producer:RunRecord,consumerRunId:string,caseId:string):Promise<void>{
+    if(producer.parentRunId||producer.state!=='succeeded')throw new Error('External input producer must be a completed root');
+    const agentStep=await db.query('SELECT 1 FROM aw_steps WHERE workspace_id=$1 AND run_id=$2 AND document->>\'kind\'=\'agent\' LIMIT 1',
+      [sourceWorkspaceId,producer.id]);
+    const childRun=await db.query('SELECT 1 FROM aw_runs WHERE workspace_id=$1 AND parent_run_id=$2 LIMIT 1',
+      [sourceWorkspaceId,producer.id]);
+    if(agentStep.rows.length||childRun.rows.length)throw new Error('External input producer must be program-only');
+    const consumer=(await db.query<{document:SpaceRun}>('SELECT document FROM ws_runs WHERE space_id=$1 AND run_id=$2',
+      [spaceId,consumerRunId])).rows[0]?.document;
+    if(!consumer||consumer.executionMode!=='external-host'||consumer.externalSource?.workspaceId!==sourceWorkspaceId||
+      consumer.caseId!==caseId||consumer.externalSource.inputProducerForRunId)
+      throw new Error('External input producer requires an already bound execution in the same Case and source workspace');
+    const nativeConsumer=(await db.query<{document:RunRecord}>('SELECT document FROM aw_runs WHERE workspace_id=$1 AND id=$2',
+      [sourceWorkspaceId,consumerRunId])).rows[0]?.document;
+    const consumerManifest=await this.one<InputManifest>(db,'ws_manifests',spaceId,consumer.inputManifestId);
+    const inputAssetId=consumerManifest.assets.nativeRunInput;
+    if(!nativeConsumer||!inputAssetId||consumerManifest.caseId!==caseId)
+      throw new Error('Bound execution has no exact native input manifest');
+    const inputAsset=await this.asset(db,spaceId,inputAssetId);
+    if(inputAsset.source.kind!=='import'||workflowFingerprint(inputAsset.payload)!==nativeConsumer.inputFingerprint)
+      throw new Error('Bound execution native input fingerprint mismatch');
+    const input=inputAsset.payload as Record<string,unknown>;
+    let matched=false;
+    for(const value of [input?.candidate,input?.evidence]){
+      if(!value||typeof value!=='object'||Array.isArray(value))continue;
+      const ref=value as Record<string,unknown>;
+      if(typeof ref.id!=='string'||typeof ref.revision!=='string'||typeof ref.sha256!=='string')continue;
+      const artifact=(await db.query<{document:ArtifactRef}>('SELECT document FROM aw_artifacts WHERE workspace_id=$1 AND id=$2 AND run_id=$3',
+        [sourceWorkspaceId,ref.id,producer.id])).rows[0]?.document;
+      if(artifact&&artifact.id===ref.id&&artifact.revision===ref.revision&&artifact.sha256===ref.sha256&&
+        artifact.producedBy.workflowRunId===producer.id)matched=true;
+    }
+    if(!matched)throw new Error('External input producer is not an exact candidate or evidence source');
+  }
+  /** Advance only an explicit bounded set of source ledger runs. Space never executes or invents these runs. */
+  async syncExternalRuns(spaceId:string,input:ExternalRunSyncInput):Promise<SpaceRun[]> {
+    if(!this.presentationOptions.historicalSourceWorkspaceIds?.includes(input.sourceWorkspaceId)||input.sourceWorkspaceId===spaceId)
+      throw new Error('External source workspace is not authorized by the host');
+    if(!input.runs.length||input.runs.length>32||new Set(input.runs.map(run=>run.runId)).size!==input.runs.length)
+      throw new Error('External sync requires 1–32 distinct runs');
+    return this.tx(async db=>{
+      await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+      await this.access(db,spaceId,['owner','creator'],true);await this.lock(db,spaceId);
+      const bindings:SpaceRun[]=[];
+      for(const item of input.runs){
+        const version=await this.one<WorkflowVersion>(db,'ws_workflows',spaceId,item.workflowVersionId);
+        const entry=version.entrypoints[item.entrypoint];if(!entry)throw new Error('Unknown external workflow entrypoint');
+        const manifest=await this.one<InputManifest>(db,'ws_manifests',spaceId,item.inputManifestId);
+        const config=item.effectiveConfig??version.config;safeConfig(config);
+        const source=(await db.query<{document:RunRecord}>(
+          'SELECT document FROM aw_runs WHERE workspace_id=$1 AND id=$2',[input.sourceWorkspaceId,item.runId])).rows[0]?.document;
+        if(!source||source.workflowId!==entry.workflowId||source.workflowRevision!==entry.codeRevision)
+          throw new Error('External native executable identity does not match frozen entrypoint');
+        const prior=(await db.query<{document:SpaceRun}>(
+          'SELECT document FROM ws_runs WHERE space_id=$1 AND run_id=$2',[spaceId,item.runId])).rows[0]?.document;
+        if(item.supportingOf){
+          if(source.parentRunId||source.state!=='succeeded')throw new Error('External supporting run must be a completed root');
+          if(!prior)await this.verifyExternalInputProducer(db,spaceId,input.sourceWorkspaceId,source,item.supportingOf,manifest.caseId);
+          else if(prior.externalSource?.inputProducerForRunId!==item.supportingOf)
+            throw new Error('External input producer binding conflicts with existing run');
+        }
+        const producerFor=prior?.externalSource?.inputProducerForRunId??item.supportingOf;
+        const binding:SpaceRun={runId:item.runId,spaceId,workflowVersionId:version.id,entrypoint:item.entrypoint,
+          caseId:manifest.caseId,inputManifestId:manifest.id,effectiveConfig:clone(config),configHash:await hash(config),
+          executionMode:'external-host',externalSource:{workspaceId:input.sourceWorkspaceId,runId:item.runId,
+            ...(producerFor?{inputProducerForRunId:producerFor}:{})}};
+        if(prior&&await hash(prior)!==await hash(binding))throw new Error('External run binding conflicts with existing run');
+        if(!prior&&!source.parentRunId&&!item.supportingOf&&!['queued','running','waiting'].includes(source.state))
+          throw new Error('External root must be linked while native execution is active');
+        if(!prior&&!source.parentRunId&&!item.supportingOf){
+          const begun=await db.query<{begun:boolean}>(
+            `SELECT EXISTS(SELECT 1 FROM aw_steps WHERE workspace_id=$1 AND run_id=$2)
+              OR EXISTS(SELECT 1 FROM aw_events WHERE workspace_id=$1 AND run_id=$2)
+              OR EXISTS(SELECT 1 FROM aw_artifacts WHERE workspace_id=$1 AND run_id=$2)
+              OR EXISTS(SELECT 1 FROM aw_runs WHERE workspace_id=$1 AND parent_run_id=$2) AS begun`,
+            [input.sourceWorkspaceId,item.runId]);
+          if(begun.rows[0]?.begun)throw new Error('External root must be linked before native work begins');
+        }
+        if(!prior&&source.parentRunId){
+          const requestedParent=input.runs.some(run=>run.runId===source.parentRunId);
+          const boundParent=requestedParent?undefined:(await db.query<{document:SpaceRun}>(
+            'SELECT document FROM ws_runs WHERE space_id=$1 AND run_id=$2',[spaceId,source.parentRunId])).rows[0]?.document;
+          if(!requestedParent&&(boundParent?.executionMode!=='external-host'||boundParent.externalSource?.workspaceId!==input.sourceWorkspaceId))
+            throw new Error('External child requires a linked native parent');
+        }
+        bindings.push(binding);
+      }
+      await syncExternalRunSet(db,spaceId,input.sourceWorkspaceId,input.runs.map(run=>run.runId));
+      for(const binding of bindings)await db.query(
+        'INSERT INTO ws_runs(space_id,run_id,workflow_version_id,case_id,manifest_id,document) VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(space_id,run_id) DO NOTHING',
+        [spaceId,binding.runId,binding.workflowVersionId,binding.caseId,binding.inputManifestId,json(binding)]);
+      return bindings;
+    });
+  }
   private async asset(db: DB, spaceId: string, id: string): Promise<AssetVersion> {
     const asset = await this.one<AssetVersion>(db,'ws_asset_versions',spaceId,id);
     if (await hash(asset.payload) !== asset.payloadHash) throw new Error('Asset payload integrity check failed');
@@ -578,7 +678,7 @@ export class WorkflowSpaceService {
       attachments.push(blob);
     }
     const version: AssetVersion = {id:randomUUID(),spaceId,assetId,version:existing.rows[0]?.next_version??1,schema:clone(input.schema),payload:clone(input.payload),payloadHash:await hash(input.payload),source,dependencies,attachments,initialState,createdAt:now()};
-    const producer = source.kind==='node'||source.kind==='historical-artifact'?source:undefined;
+    const producer = source.kind==='node'||source.kind==='historical-artifact'||source.kind==='external-artifact'?source:undefined;
     await db.query('INSERT INTO ws_asset_versions(space_id,id,asset_id,version,namespace,schema_revision,schema_hash,run_id,step_run_id,attempt_id,document) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)',
       [spaceId,version.id,assetId,version.version,input.schema.namespace,input.schema.revision,input.schema.hash,producer?.runId??null,producer?.stepRunId??null,producer?.attemptId??null,json(version)]);
     for (const id of dependencies) await db.query('INSERT INTO ws_asset_dependencies(space_id,version_id,dependency_id) VALUES($1,$2,$3)',[spaceId,version.id,id]);
@@ -613,6 +713,32 @@ export class WorkflowSpaceService {
           stepRunId:artifact.producedBy.stepRunId,attemptId:artifact.producedBy.attemptId,artifactId:artifact.id,
           sourceWorkspaceId:binding.historicalSource.workspaceId,originalSha256:artifact.sha256,originalUri:artifact.uri};
         const version=await this.writeAsset(db,spaceId,{assetId:input.assetId??`historical-artifact:${artifact.id}`,
+          schema:input.schema,payload},source,'candidate');
+        await db.query('INSERT INTO ws_runtime_artifacts(space_id,artifact_id,version_id) VALUES($1,$2,$3)',
+          [spaceId,artifact.id,version.id]);
+        return version;
+      });
+    });
+  }
+  /** Domain projection of a native artifact from a currently linked external execution. */
+  async publishExternalArtifact(spaceId:string,input:{artifactId:string;schema:AssetWrite['schema'];assetId?:string;idempotencyKey:string}):Promise<AssetVersion>{
+    return this.tx(async db=>{
+      await this.access(db,spaceId,['owner','creator'],true);required(input.artifactId,'External artifact ID');
+      return this.idempotent(db,spaceId,'externalArtifact',input.idempotencyKey,input,async()=>{
+        const ledger=this.ledger(spaceId).inTransaction(db),artifact=await ledger.getArtifact(input.artifactId);
+        if(!artifact)throw new Error('External artifact is not in the Space ledger');
+        const binding=await this.one<SpaceRun>(db,'ws_runs',spaceId,artifact.producedBy.workflowRunId,'run_id');
+        if(binding.executionMode!=='external-host'||binding.externalSource?.runId!==artifact.producedBy.workflowRunId)
+          throw new Error('Artifact producer is not an externally linked run');
+        const payload=await ledger.getArtifactPayload(artifact.id);
+        if(await hash(payload)!==artifact.sha256)throw new Error('External artifact payload hash mismatch');
+        const mapped=(await db.query<{version_id:string}>(
+          'SELECT version_id FROM ws_runtime_artifacts WHERE space_id=$1 AND artifact_id=$2',[spaceId,artifact.id])).rows[0];
+        if(mapped)throw new Error('External artifact already has a domain publication');
+        const source:AssetSource={kind:'external-artifact',runId:artifact.producedBy.workflowRunId,
+          stepRunId:artifact.producedBy.stepRunId,attemptId:artifact.producedBy.attemptId,artifactId:artifact.id,
+          sourceWorkspaceId:binding.externalSource.workspaceId,originalSha256:artifact.sha256,originalUri:artifact.uri};
+        const version=await this.writeAsset(db,spaceId,{assetId:input.assetId??`external-artifact:${artifact.id}`,
           schema:input.schema,payload},source,'candidate');
         await db.query('INSERT INTO ws_runtime_artifacts(space_id,artifact_id,version_id) VALUES($1,$2,$3)',
           [spaceId,artifact.id,version.id]);
@@ -911,7 +1037,7 @@ export class WorkflowSpaceService {
         const asset = await this.asset(db,spaceId,input.assetVersionId);
         const version = await this.one<WorkflowVersion>(db,'ws_workflows',spaceId,input.workflowVersionId),contract = version.entrypoints[input.entrypoint]?.storageContract;
         if(!contract) throw new Error('Unknown entrypoint');
-        if(asset.source.kind==='node'||asset.source.kind==='historical-artifact') {
+        if(asset.source.kind==='node'||asset.source.kind==='historical-artifact'||asset.source.kind==='external-artifact') {
           const sourceRun=await this.one<SpaceRun>(db,'ws_runs',spaceId,asset.source.runId,'run_id');
           if(sourceRun.workflowVersionId!==input.workflowVersionId||sourceRun.entrypoint!==input.entrypoint) throw new Error('Decision workflow does not match asset production');
         }
@@ -958,7 +1084,7 @@ export class WorkflowSpaceService {
       }
       for(const id of input.assetVersionIds) {
         const asset = await this.asset(db,spaceId,id);
-        if((asset.source.kind!=='node'&&asset.source.kind!=='historical-artifact')||asset.source.runId!==run.runId)
+        if((asset.source.kind!=='node'&&asset.source.kind!=='historical-artifact'&&asset.source.kind!=='external-artifact')||asset.source.runId!==run.runId)
           throw new Error('Review target must be produced by reviewed run');
       }
       for(const id of input.evidence) await this.asset(db,spaceId,id);
@@ -1897,7 +2023,7 @@ export class WorkflowSpaceService {
     if(!Number.isInteger(cursor)||cursor<0||!Number.isInteger(limit)||limit<1||limit>100) throw new Error('Invalid relation page cursor or size');
     if(options.runId) await this.one<SpaceRun>(this.pool,'ws_runs',spaceId,options.runId,'run_id');
     const asset=await this.asset(this.pool,spaceId,assetVersionId);
-    const runId=options.runId??(asset.source.kind==='node'?asset.source.runId:undefined);
+    const runId=options.runId??(asset.source.kind==='node'||asset.source.kind==='external-artifact'?asset.source.runId:undefined);
     const extra=runId?(await this.process(spaceId,runId)).relations.filter(relation=>relation.provenance!=='recorded'):[];
     const items=await queryRelationFacts(this.pool,spaceId,{assetVersionId,runId:options.runId,cursor,limit:limit+1,extra});
     return {items:items.slice(0,limit),nextCursor:cursor+Math.min(items.length,limit),hasMore:items.length>limit};
@@ -1908,6 +2034,64 @@ export class WorkflowSpaceService {
   /** Narrow, principal-bound reads for one browser-visible subject. */
   async readRun(spaceId:string,runId:string):Promise<SpaceRun> {
     await this.access(this.pool,spaceId);return this.one(this.pool,'ws_runs',spaceId,runId,'run_id');
+  }
+  /** Bounded read from the copied Space ledger; source namespaces are never queried here. */
+  async nativeRunEvents(spaceId:string,runId:string,after=0,limit=50):Promise<NativeRunEventsPage>{
+    if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(limit)||limit<1||limit>100)
+      throw new Error('Invalid native event page');
+    await this.access(this.pool,spaceId);
+    const binding=await this.one<SpaceRun>(this.pool,'ws_runs',spaceId,runId,'run_id');
+    if(binding.executionMode!=='imported'&&binding.executionMode!=='external-host')
+      throw new Error('Native events require an imported or external-host run');
+    const source=binding.executionMode==='imported'?binding.historicalSource:binding.externalSource;
+    if(!source||source.runId!==runId)throw new Error('Native run source identity mismatch');
+    const [runResult,eventResult,childrenResult]=await Promise.all([
+      this.pool.query<{document:RunRecord}>('SELECT document FROM aw_runs WHERE workspace_id=$1 AND id=$2',[spaceId,runId]),
+      this.pool.query<{id:string;seq:string;step_run_id:string|null;attempt_id:string|null;document:WorkflowEvent}>(
+        'SELECT id,seq,step_run_id,attempt_id,document FROM aw_events WHERE workspace_id=$1 AND run_id=$2 AND seq>$3 ORDER BY seq LIMIT $4',
+        [spaceId,runId,after,limit+1]),
+      this.pool.query<{document:RunRecord}>(
+        'SELECT document FROM aw_runs WHERE workspace_id=$1 AND parent_run_id=$2 ORDER BY id LIMIT 33',[spaceId,runId]),
+    ]);
+    const run=runResult.rows[0]?.document;
+    if(!run||run.id!==runId)throw new Error('Native run ledger identity mismatch');
+    if(childrenResult.rows.length>32)throw new Error('Native run has more than 32 children');
+    const childRuns=childrenResult.rows.map(row=>row.document);
+    const childIds=childRuns.map(child=>child.id);
+    const stepIds=[...new Set([...eventResult.rows.map(row=>row.step_run_id),...childRuns.map(child=>child.parentStepRunId)]
+      .filter((id):id is string=>!!id))];
+    const attemptIds=[...new Set(eventResult.rows.map(row=>row.attempt_id).filter((id):id is string=>!!id))];
+    const [stepResult,attemptResult,boundResult]=await Promise.all([
+      stepIds.length?this.pool.query<{id:string;run_id:string}>('SELECT id,run_id FROM aw_steps WHERE workspace_id=$1 AND id=ANY($2::text[])',[spaceId,stepIds]):Promise.resolve({rows:[]}),
+      attemptIds.length?this.pool.query<{id:string;run_id:string;step_run_id:string}>('SELECT id,run_id,step_run_id FROM aw_attempts WHERE workspace_id=$1 AND id=ANY($2::text[])',[spaceId,attemptIds]):Promise.resolve({rows:[]}),
+      childIds.length?this.pool.query<{document:SpaceRun}>('SELECT document FROM ws_runs WHERE space_id=$1 AND run_id=ANY($2::text[])',[spaceId,childIds]):Promise.resolve({rows:[]}),
+    ]);
+    const steps=new Map(stepResult.rows.map(row=>[row.id,row]));
+    const attempts=new Map(attemptResult.rows.map(row=>[row.id,row]));
+    const bound=new Map(boundResult.rows.map(row=>[row.document.runId,row.document]));
+    const children=childRuns.map(child=>{
+      if(child.parentRunId!==runId||child.parentStepRunId&&steps.get(child.parentStepRunId)?.run_id!==runId)
+        throw new Error('Native child parent identity mismatch');
+      const linked=bound.get(child.id);
+      if(linked&&(linked.spaceId!==spaceId||linked.caseId!==binding.caseId||linked.executionMode!==binding.executionMode||
+        (linked.executionMode==='imported'?linked.historicalSource?.workspaceId:linked.externalSource?.workspaceId)!==source.workspaceId))
+        throw new Error('Native child Space binding mismatch');
+      return {runId:child.id,workflowId:child.workflowId,state:child.state,parentStepRunId:child.parentStepRunId??null,
+        binding:linked?'bound' as const:'pending' as const};
+    });
+    const rows=eventResult.rows.slice(0,limit);
+    const items=rows.map(row=>{
+      const event=row.document;
+      if(event.id!==row.id||event.runId!==runId||event.seq!==Number(row.seq)||
+        (event.stepRunId??null)!==row.step_run_id||(event.attemptId??null)!==row.attempt_id)
+        throw new Error('Native event ledger identity mismatch');
+      if(row.step_run_id&&steps.get(row.step_run_id)?.run_id!==runId)throw new Error('Native event step ownership mismatch');
+      if(row.attempt_id){const attempt=attempts.get(row.attempt_id);
+        if(!attempt||attempt.run_id!==runId||attempt.step_run_id!==row.step_run_id)throw new Error('Native event attempt ownership mismatch');}
+      return projectNativeEvent(event);
+    });
+    return {runId,executionMode:binding.executionMode,items,nextCursor:eventResult.rows.length>limit?items.at(-1)!.seq:null,
+      hasMore:eventResult.rows.length>limit,snapshotAt:now(),sanitized:true,children};
   }
   /** Source identity for a human-authored annotation; browser payloads cannot choose this author. */
   async authenticatedHumanWriter(spaceId:string):Promise<{id:string;kind:'human'}> {
@@ -1998,20 +2182,22 @@ export class WorkflowSpaceService {
   }
   /** Resolves a saved node output or an exact, explicitly labeled historical ledger artifact. */
   async readPublishedAssetTarget(spaceId:string,target:PublishedAssetTarget):Promise<{
-    asset:AssetVersion & {state:string};source:Extract<AssetSource,{kind:'node'|'historical-artifact'}>;producerNativeSessionIds:string[]
+    asset:AssetVersion & {state:string};source:Extract<AssetSource,{kind:'node'|'historical-artifact'|'external-artifact'}>;producerNativeSessionIds:string[]
   }> {
     for(const key of ['runId','assetVersionId','payloadHash'] as const)
       if(typeof target?.[key]!=='string'||!target[key].trim())throw new Error(`Published asset ${key} is required`);
     await this.readRun(spaceId,target.runId);
     const asset=await this.readAsset(spaceId,target.assetVersionId);
     if(asset.payloadHash!==target.payloadHash)throw new Error('Published asset payload hash mismatch');
-    if((asset.source.kind!=='node'&&asset.source.kind!=='historical-artifact')||asset.source.runId!==target.runId)
+    if((asset.source.kind!=='node'&&asset.source.kind!=='historical-artifact'&&asset.source.kind!=='external-artifact')||asset.source.runId!==target.runId)
       throw new Error('Published asset must have exact run provenance');
     const source=asset.source;
-    if(source.kind==='historical-artifact'){
+    if(source.kind==='historical-artifact'||source.kind==='external-artifact'){
       const binding=await this.readRun(spaceId,target.runId);
-      if(binding.executionMode!=='imported'||binding.historicalSource?.workspaceId!==source.sourceWorkspaceId)
-        throw new Error('Historical asset source does not match imported run');
+      if(source.kind==='historical-artifact'?
+        binding.executionMode!=='imported'||binding.historicalSource?.workspaceId!==source.sourceWorkspaceId:
+        binding.executionMode!=='external-host'||binding.externalSource?.workspaceId!==source.sourceWorkspaceId)
+        throw new Error('Native asset source does not match linked run');
       const artifact=await this.ledger(spaceId).getArtifact(source.artifactId);
       const mapped=await this.pool.query<{version_id:string}>(
         'SELECT version_id FROM ws_runtime_artifacts WHERE space_id=$1 AND artifact_id=$2',[spaceId,source.artifactId]);
@@ -2019,7 +2205,7 @@ export class WorkflowSpaceService {
         artifact.producedBy.stepRunId!==source.stepRunId||artifact.producedBy.attemptId!==source.attemptId||
         artifact.sha256!==source.originalSha256||artifact.uri!==source.originalUri||
         await hash(await this.ledger(spaceId).getArtifactPayload(source.artifactId))!==asset.payloadHash)
-        throw new Error('Historical asset publication provenance mismatch');
+        throw new Error('Native asset publication provenance mismatch');
       return {asset,source:clone(source),producerNativeSessionIds:[]};
     }
     const context=await this.one<NodeContext>(this.pool,'ws_contexts',spaceId,source.contextId);
@@ -2077,7 +2263,8 @@ export class WorkflowSpaceService {
     const payload={target:clone(target),source:clone(observed.source),observer:{id:agent.id,sessionId:agent.sessionId,servicePrincipalId:this.principal.id},
       producerNativeSessionIds:observed.producerNativeSessionIds,delivery:'published-asset-read' as const};
     const version=await this.importAsset(spaceId,{assetId:externalAgentAssetObservationAssetId(agent.sessionId,target.assetVersionId),
-      schema:observed.source.kind==='historical-artifact'?EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF:EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF,
+      schema:observed.source.kind==='historical-artifact'?EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF:
+        observed.source.kind==='external-artifact'?EXTERNAL_AGENT_EXTERNAL_ASSET_OBSERVATION_SCHEMA_REF:EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF,
       payload,dependencies:[target.assetVersionId],
       description:'External Agent read of exact published asset',
       idempotencyKey:`external-agent-observation:asset:${agent.sessionId}:${target.assetVersionId}`});
@@ -2087,7 +2274,8 @@ export class WorkflowSpaceService {
     const version=await this.readAsset(spaceId,receiptId);
     if(version.schema.namespace===EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF.namespace&&
       (version.schema.revision===EXTERNAL_AGENT_ASSET_OBSERVATION_SCHEMA_REF.revision||
-       version.schema.revision===EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF.revision)) {
+       version.schema.revision===EXTERNAL_AGENT_HISTORICAL_ASSET_OBSERVATION_SCHEMA_REF.revision||
+       version.schema.revision===EXTERNAL_AGENT_EXTERNAL_ASSET_OBSERVATION_SCHEMA_REF.revision)) {
       const receipt=externalAgentAssetObservationReceipt(version);
       const observed=await this.readPublishedAssetTarget(spaceId,receipt.target);
       if(await hash(receipt.source)!==await hash(observed.source)||

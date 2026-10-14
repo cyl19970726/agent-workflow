@@ -151,7 +151,7 @@ export function createRunDispositionStore(service:WorkflowSpaceService) {
       for(const ref of input.evidenceRefs) {
         if(ref.kind==='asset') {
           const asset=await service.readAsset(spaceId,ref.assetVersionId);
-          if((asset.source.kind!=='node'&&asset.source.kind!=='historical-artifact')||asset.source.runId!==run.runId) {
+          if((asset.source.kind!=='node'&&asset.source.kind!=='historical-artifact'&&asset.source.kind!=='external-artifact')||asset.source.runId!==run.runId) {
             manifestIds??=new Set(Object.values((await service.readManifest(spaceId,run.inputManifestId)).assets));
             if(!manifestIds.has(asset.id))throw new Error('Disposition asset evidence is outside the run');
           }

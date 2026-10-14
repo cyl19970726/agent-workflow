@@ -93,5 +93,6 @@ export function versionDto(data:Pick<SpaceOverview,'runs'>,version:WorkflowVersi
   const runs=data.runs.filter(run=>run.workflowVersionId===version.id&&run.entrypoint===entrypoint);
   const savedLabel=presentationLabel?.trim();
   const time=displayTime(version.createdAt,displayTimeZone);
-  return {id:version.id,label:savedLabel?`${savedLabel} · ${time}`:`${version.revision} · ${time} · ${version.id.slice(-8)}`,labelSource:savedLabel?'saved-presentation':'derived',revision:version.revision,createdAt:version.createdAt,changeReason:version.changeReason,predecessorId:version.predecessorId??null,entrypoint,definitionAvailability:entry?.process?'recorded':'missing',availability,runCount:stats?.runCount??runs.length,caseCount:stats?.caseCount??new Set(runs.map(run=>run.caseId)).size,planIds};
+  const methodKind=version.config?.historical===true?'historical-observation':version.config?.methodKind==='auxiliary'?'auxiliary':'primary';
+  return {id:version.id,workflowId:entry?.workflowId,methodKind,label:savedLabel?`${savedLabel} · ${time}`:`${version.revision} · ${time} · ${version.id.slice(-8)}`,labelSource:savedLabel?'saved-presentation':'derived',revision:version.revision,createdAt:version.createdAt,changeReason:version.changeReason,predecessorId:version.predecessorId??null,entrypoint,definitionAvailability:entry?.process?'recorded':'missing',availability,runCount:stats?.runCount??runs.length,caseCount:stats?.caseCount??new Set(runs.map(run=>run.caseId)).size,planIds};
 }

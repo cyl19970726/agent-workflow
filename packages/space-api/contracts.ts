@@ -56,7 +56,7 @@ export const MethodDesignPublicationReceiptSchema=z.object({versionId:id,designR
 export type MethodDesignPublicationReceiptDto=z.infer<typeof MethodDesignPublicationReceiptSchema>;
 export const AvailabilitySchema=z.object({state:z.enum(['available','unavailable','unknown']),reason:nullable});
 export type AvailabilityDto=z.infer<typeof AvailabilitySchema>;
-export const VersionSummarySchema=z.object({id,label:z.string(),labelSource:z.string(),revision:z.string(),createdAt:z.string(),changeReason:z.string(),predecessorId:nullable,entrypoint:id,definitionAvailability:z.enum(['recorded','missing']),availability:AvailabilitySchema,runCount:z.number().int().nonnegative(),caseCount:z.number().int().nonnegative(),planIds:strings});
+export const VersionSummarySchema=z.object({id,workflowId:id.optional(),methodKind:z.enum(['primary','auxiliary','historical-observation']).optional(),label:z.string(),labelSource:z.string(),revision:z.string(),createdAt:z.string(),changeReason:z.string(),predecessorId:nullable,entrypoint:id,definitionAvailability:z.enum(['recorded','missing']),availability:AvailabilitySchema,runCount:z.number().int().nonnegative(),caseCount:z.number().int().nonnegative(),planIds:strings});
 export type VersionSummaryDto=z.infer<typeof VersionSummarySchema>;
 export const SlotSchema=z.object({slot:id,schema:z.object({namespace:id,revision:id,hash:z.string()}),label:z.string(),optional:z.boolean().nullable(),states:strings,projection:z.object({version:z.string(),fields:strings}).nullable(),requiredInputs:strings,sources:z.array(z.object({kind:z.enum(['run-input','node']),source:id,port:nullable,selection:z.string(),when:z.enum(['initial-round','later-rounds']).nullable()}))});
 export type SlotDto=z.infer<typeof SlotSchema>;
@@ -95,7 +95,7 @@ export const NodeDetailSchema=NodeSummarySchema.extend({versionId:id,instruction
 export type NodeDetailDto=z.infer<typeof NodeDetailSchema>;
 export const CaseSummarySchema=z.object({id,title:z.string(),objective:z.string(),constraints:strings,runCount:z.number().int().nonnegative(),assetCount:z.number().int().nonnegative()});
 export type CaseSummaryDto=z.infer<typeof CaseSummarySchema>;
-export const AssetSummarySchema=z.object({id,title:z.string(),kind:z.string(),state:z.string(),createdAt:z.string(),schema:z.object({namespace:id,revision:id,hash:z.string()}),sourceKind:z.enum(['import','node','historical-artifact','transform']),runId:nullable,caseId:nullable,versionId:nullable,nodeId:nullable,occurrenceId:nullable,round:z.number().nullable()});
+export const AssetSummarySchema=z.object({id,title:z.string(),kind:z.string(),state:z.string(),createdAt:z.string(),schema:z.object({namespace:id,revision:id,hash:z.string()}),sourceKind:z.enum(['import','node','historical-artifact','external-artifact','transform']),runId:nullable,caseId:nullable,versionId:nullable,nodeId:nullable,occurrenceId:nullable,round:z.number().nullable()});
 export type AssetSummaryDto=z.infer<typeof AssetSummarySchema>;
 export const CaseFrozenInputsSchema=z.object({caseId:id,manifests:z.array(z.object({id,hash:z.string(),slots:z.array(z.object({slot:id,asset:AssetSummarySchema,payloadHash:z.string(),readingUrl:z.string()}))})),hasMore:z.boolean(),nextCursor:nullable,snapshotAt:z.string()});
 export type CaseFrozenInputsDto=z.infer<typeof CaseFrozenInputsSchema>;
@@ -115,6 +115,15 @@ export const RunInputManifestSchema=z.object({runId:id,caseId:id,versionId:id,in
 export type RunInputManifestDto=z.infer<typeof RunInputManifestSchema>;
 export const RunSessionEventsSchema=z.object({runId:id,sessionId:id,items:z.array(z.object({id,seq:z.number().int().positive(),attemptId:id,kind:z.enum(['message','tool','trace','error']),body:z.unknown(),createdAt:z.string()})),nextCursor:z.number().int().nonnegative(),hasMore:z.boolean(),snapshotAt:z.string()});
 export type RunSessionEventsDto=z.infer<typeof RunSessionEventsSchema>;
+const NativeEventSchema=z.object({id,seq:z.number().int().positive(),type:z.string(),timestamp:z.string(),stepRunId:nullable,attemptId:nullable,
+  turn:z.number().int().nonnegative().nullable(),requestAttempt:z.number().int().nonnegative().nullable(),httpStatus:z.number().int().nonnegative().nullable(),
+  transport:z.object({phase:nullable,errorName:nullable,causeCode:nullable,bytesRead:z.number().int().nonnegative().nullable(),retrying:z.boolean().nullable()}).nullable(),
+  response:z.object({outputItems:z.number().int().nonnegative().nullable(),output:z.array(z.object({type:z.string(),name:nullable})),hasText:z.boolean(),hasFinalText:z.boolean(),textHash:nullable}).nullable(),
+  tool:z.object({name:nullable,callId:nullable,status:nullable}).nullable()}).strict();
+export const NativeRunEventsSchema=z.object({runId:id,executionMode:z.enum(['imported','external-host']),items:z.array(NativeEventSchema),
+  nextCursor:z.number().int().nonnegative().nullable(),hasMore:z.boolean(),snapshotAt:z.string(),sanitized:z.literal(true),
+  children:z.array(z.object({runId:id,workflowId:id,state:z.string(),parentStepRunId:nullable,binding:z.enum(['bound','pending'])}).strict()).max(32)}).strict();
+export type NativeRunEventsDto=z.infer<typeof NativeRunEventsSchema>;
 export const RuntimeEventSchema=z.object({id,seq:z.number().int().positive(),attemptId:id,createdAt:z.string(),type:z.enum(['siwc.started','siwc.tool_call','siwc.tool_result','siwc.tool_failed']),turn:z.number().int().nonnegative().nullable(),callId:nullable,name:nullable,providerInstructions:nullable,providerModel:nullable,providerToolProfileHash:nullable,argumentsHash:nullable,outputHash:nullable,
   toolDefinitions:z.array(z.object({name:id,description:z.string(),parameters:z.unknown(),outputSchema:z.null(),outputSchemaCoverage:z.literal('not-recorded')})).nullable(),arguments:z.unknown().optional(),output:z.unknown().optional(),outcomeUnknown:z.boolean().nullable(),bodyCoverage:z.enum(['full','truncated'])});
 export const RuntimeCallSchema=z.object({callId:id,name:nullable,turn:z.number().int().nonnegative().nullable(),callEventId:nullable,callSeq:z.number().int().positive().nullable(),outcomeEventId:nullable,outcomeSeq:z.number().int().positive().nullable(),status:z.enum(['returned','failed-outcome-unknown','pending-or-later-page','call-on-earlier-page'])});
@@ -145,9 +154,10 @@ export const PublishedAssetTargetSchema=z.object({runId:id,assetVersionId:id,pay
 export type PublishedAssetTargetDto=z.infer<typeof PublishedAssetTargetSchema>;
 const NodeAssetSourceSchema=z.object({kind:z.literal('node'),runId:id,stepRunId:id,attemptId:id,nodeId:id,producer:z.enum(['agent','program']),sessionId:id,contextId:id,generatedByContextId:id.optional()});
 const HistoricalArtifactSourceSchema=z.object({kind:z.literal('historical-artifact'),runId:id,stepRunId:id,attemptId:id,artifactId:id,sourceWorkspaceId:id,originalSha256:z.string().regex(/^[a-f0-9]{64}$/u),originalUri:z.string()});
+const ExternalArtifactSourceSchema=z.object({kind:z.literal('external-artifact'),runId:id,stepRunId:id,attemptId:id,artifactId:id,sourceWorkspaceId:id,originalSha256:z.string().regex(/^[a-f0-9]{64}$/u),originalUri:z.string()});
 export const ExternalAgentObservationReceiptSchema=z.object({id,assetId:id,payloadHash:z.string(),createdAt:z.string(),target:SavedResponseTargetSchema,observer:z.object({id,sessionId:id,servicePrincipalId:id}),producerNativeSessionId:id.optional(),delivery:z.literal('saved-response-read')});
 export type ExternalAgentObservationReceiptDto=z.infer<typeof ExternalAgentObservationReceiptSchema>;
-export const ExternalAgentAssetObservationReceiptSchema=z.object({id,assetId:id,payloadHash:z.string(),createdAt:z.string(),target:PublishedAssetTargetSchema,source:z.discriminatedUnion('kind',[NodeAssetSourceSchema,HistoricalArtifactSourceSchema]),observer:z.object({id,sessionId:id,servicePrincipalId:id}),producerNativeSessionIds:strings,delivery:z.literal('published-asset-read')});
+export const ExternalAgentAssetObservationReceiptSchema=z.object({id,assetId:id,payloadHash:z.string(),createdAt:z.string(),target:PublishedAssetTargetSchema,source:z.discriminatedUnion('kind',[NodeAssetSourceSchema,HistoricalArtifactSourceSchema,ExternalArtifactSourceSchema]),observer:z.object({id,sessionId:id,servicePrincipalId:id}),producerNativeSessionIds:strings,delivery:z.literal('published-asset-read')});
 export type ExternalAgentAssetObservationReceiptDto=z.infer<typeof ExternalAgentAssetObservationReceiptSchema>;
 export const ExternalAgentObservationReceiptUnionSchema=z.discriminatedUnion('delivery',[ExternalAgentObservationReceiptSchema,ExternalAgentAssetObservationReceiptSchema]);
 export const ExternalAgentObservationRequestSchema=z.object({target:SavedResponseTargetSchema}).strict();

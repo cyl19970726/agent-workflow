@@ -8,7 +8,7 @@ import {AssetReadingSchema, AssetRelationsSchema, AssetSummarySchema, BusinessCo
 import {MethodDesignBasisSchema, MethodDesignPreviewSchema, MethodDesignPublicationReceiptSchema, MethodDesignPublicationRequestSchema, MethodDesignRevisionListSchema, MethodDesignRevisionRequestSchema, MethodDesignRevisionSchema, type MethodDesignPreviewDto, type MethodDesignPublicationReceiptDto} from './contracts.js';
 import {MethodCapabilityRevisionListSchema,MethodCapabilityRevisionRequestSchema,MethodCapabilityRevisionSchema,MethodDesignDefinitionSchema,type MethodDesignDefinitionDto} from './contracts.js';
 import {MethodExecutionCommandSchema,MethodExecutionStateSchema,type MethodExecutionCommandDto} from './contracts.js';
-import {ReadingSectionSchema, RunInputManifestSchema, RunSessionEventsSchema, OccurrenceRuntimeSchema, UnpublishedResponsesSchema, type ReadingSectionDto} from './contracts.js';
+import {ReadingSectionSchema, RunInputManifestSchema, RunSessionEventsSchema, NativeRunEventsSchema, OccurrenceRuntimeSchema, UnpublishedResponsesSchema, type ReadingSectionDto} from './contracts.js';
 import {ExternalAgentObservationRequestSchema, ExternalAgentObservationReceiptUnionSchema, ExternalAgentObservationSchema, ExternalAgentAssetObservationRequestSchema, ExternalAgentAssetObservationSchema, ReviewSubjectsSchema, RunReviewRequestSchema, RunReviewSchema, RunDispositionRequestSchema, RunDispositionRevisionSchema, RunDiagnosisRequestSchema, RunDiagnosisRevisionSchema, RunDiagnosisRevisionListSchema, type SavedResponseTargetDto, type PublishedAssetTargetDto} from './contracts.js';
 import {agentDeclarationDto,assetDto, caseDto, cleanConfig, nodeDto, occurrenceDto, runDto, versionDto} from './read-model.js';
 import {ScopedReadCache} from './read-cache.js';
@@ -16,7 +16,7 @@ import {canReadWorkflow, readableWorkflowIds, readWorkflowScopeKey} from './read
 import {runtimeEventReadings} from './runtime-read.js';
 import {AssetAttachmentsSchema, AttachmentSchema, AttachmentImportRequestSchema, AttachmentImportReceiptSchema} from './contracts.js';
 
-type NarrowService=Pick<WorkflowSpaceService,'spaceSummary'|'readRun'|'readWorkflowVersion'|'readCase'|'readReview'|'caseRunsPage'|'versionRunStats'|'versionIterationsPage'|'readAssetsByIds'|'inputManifests'|'runAssets'|'assetConsumerRuns'|'reviewsForAsset'|'reviewsForRun'|'recordReview'|'readSavedResponseTarget'|'observeSavedResponseTarget'|'readPublishedAssetTarget'|'observePublishedAsset'|'readExternalAgentObservation'|'getExecutionTask'|'adoptionHeads'|'sessionEvents'|'runtimeEvents'|'uploadBlob'|'readBlob'|'importAsset'>;
+type NarrowService=Pick<WorkflowSpaceService,'nativeRunEvents'|'spaceSummary'|'readRun'|'readWorkflowVersion'|'readCase'|'readReview'|'caseRunsPage'|'versionRunStats'|'versionIterationsPage'|'readAssetsByIds'|'inputManifests'|'runAssets'|'assetConsumerRuns'|'reviewsForAsset'|'reviewsForRun'|'recordReview'|'readSavedResponseTarget'|'observeSavedResponseTarget'|'readPublishedAssetTarget'|'observePublishedAsset'|'readExternalAgentObservation'|'getExecutionTask'|'adoptionHeads'|'sessionEvents'|'runtimeEvents'|'uploadBlob'|'readBlob'|'importAsset'>;
 type Service=Pick<WorkflowSpaceService,'listSpaces'|'overview'|'readAsset'|'readContext'|'process'|'validationPlans'|'validationPlan'|'validationSummary'|'executionTasks'|'readManifest'|'resolvePresentation'> & Partial<NarrowService>;
 async function loadRunGraphAssets(service:Service,spaceId:string,view:ProcessView):Promise<RunGraphAssets>{
   const manifest=await service.readManifest(spaceId,view.run.inputManifestId);
@@ -63,7 +63,8 @@ export interface SpaceApiHost {
   runExecutionMode?:(input:{spaceId:string;runId:string})=>Promise<string|null>;
   /** Trusted domain association for imported records; validated against saved Space objects before display. */
   importedAssetScope?:(input:{spaceId:string;asset:AssetVersion})=>Promise<{caseId:string;runId:string|null;versionId:string|null}|null>;
-  scope:{workflowId:string;entrypoint:string;adoptionSlot?:string;auxiliaryWorkflowIds?:readonly string[]};
+  /** Assessment IDs are an explicit subset of readable workflows; they never extend method mutation or execution. */
+  scope:{workflowId:string;entrypoint:string;adoptionSlot?:string;auxiliaryWorkflowIds?:readonly string[];assessmentWorkflowIds?:readonly string[]};
   /** Exact, permission-checked design Space totals; absent for legacy business hosts. */
   businessState?:(spaceId:string)=>Promise<DesignSpaceState>;
   availability?:(versionId:string)=>AvailabilityDto|Promise<AvailabilityDto>;
@@ -304,6 +305,7 @@ function reuseService(base:Service,cache:ScopedReadCache,scope:string,timing?:Re
     ...(base.readExternalAgentObservation?{readExternalAgentObservation:(spaceId,id)=>read(`agentObservation:${spaceId}:${id}`,5_000,()=>base.readExternalAgentObservation!(spaceId,id))}:{}),
     ...(base.sessionEvents?{sessionEvents:(spaceId,sessionId,after,limit)=>read(`sessionEvents:${spaceId}:${sessionId}:${after}:${limit}`,2_000,()=>base.sessionEvents!(spaceId,sessionId,after,limit))}:{}),
     ...(base.runtimeEvents?{runtimeEvents:(spaceId,sessionId,after,limit)=>read(`runtimeEvents:${spaceId}:${sessionId}:${after}:${limit}`,2_000,()=>base.runtimeEvents!(spaceId,sessionId,after,limit))}:{}),
+    ...(base.nativeRunEvents?{nativeRunEvents:(spaceId,runId,after,limit)=>base.nativeRunEvents!(spaceId,runId,after,limit)}:{}),
     ...(base.caseRunsPage?{caseRunsPage:(spaceId,caseId,workflowId,entrypoint,after,limit)=>read(`caseRuns:${spaceId}:${caseId}:${workflowId}:${entrypoint}:${after??''}:${limit}`,2_000,()=>base.caseRunsPage!(spaceId,caseId,workflowId,entrypoint,after,limit))}:{}),
     ...(base.versionRunStats?{versionRunStats:(spaceId,versionId,entrypoint,workflowId)=>read(`versionStats:${spaceId}:${versionId}:${entrypoint}:${workflowId}`,3_000,()=>base.versionRunStats!(spaceId,versionId,entrypoint,workflowId))}:{}),
     ...(base.versionIterationsPage?{versionIterationsPage:(spaceId,versionId,after,limit)=>read(`iterations:${spaceId}:${versionId}:${after??''}:${limit}`,5_000,()=>base.versionIterationsPage!(spaceId,versionId,after,limit))}:{}),
@@ -419,7 +421,9 @@ export function createWorkflowSpaceApiHandler(options:SpaceApiOptions){
         const selected=host.service.readRun?await host.service.readRun(spaceId,runId):find((await host.service.overview(spaceId)).runs,value=>value.runId===runId);
         exact(selected.runId===runId&&selected.spaceId===spaceId&&selected.entrypoint===host.scope.entrypoint);
         const method=host.service.readWorkflowVersion?await host.service.readWorkflowVersion(spaceId,selected.workflowVersionId):find((await host.service.overview(spaceId)).workflows,value=>value.id===selected.workflowVersionId);
-        exact(method.id===selected.workflowVersionId&&method.spaceId===spaceId&&method.entrypoints[selected.entrypoint]?.workflowId===host.scope.workflowId);
+        const workflowId=method.entrypoints[selected.entrypoint]?.workflowId;
+        exact(method.id===selected.workflowVersionId&&method.spaceId===spaceId&&canReadWorkflow(host.scope,workflowId)&&
+          (workflowId===host.scope.workflowId||host.scope.assessmentWorkflowIds?.includes(workflowId??'')===true));
         return selected;
       };
       if(observationWrite){
@@ -1146,6 +1150,21 @@ export function createWorkflowSpaceApiHandler(options:SpaceApiOptions){
         return association?{...dto,caseId:association.caseId,runId:association.runId,versionId:association.versionId,nodeId:null,occurrenceId:null,round:null}:dto;
       };
       const executionMode=async(runId:string)=>authenticated.runExecutionMode?authenticated.runExecutionMode({spaceId,runId}):null;
+      if(segment[0]==='runs'&&segment[1]&&segment[2]==='native-events'&&segment.length===3){
+        if(!authenticated.service.nativeRunEvents)reject(404,'HISTORY_UNAVAILABLE','Native ledger events unavailable');
+        const {selected}=await exactRun(segment[1]);
+        exact(selected.runId===segment[1]);
+        if([...url.searchParams.keys()].some(key=>!['after','limit'].includes(key))||
+          url.searchParams.getAll('after').length>1||url.searchParams.getAll('limit').length>1)
+          reject(400,'INVALID_REQUEST','Invalid native event query');
+        const after=url.searchParams.has('after')?Number(url.searchParams.get('after')):0;
+        const limit=url.searchParams.has('limit')?Number(url.searchParams.get('limit')):50;
+        if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(limit)||limit<1||limit>100)
+          reject(400,'INVALID_REQUEST','Invalid native event page');
+        const page=await authenticated.service.nativeRunEvents(spaceId,selected.runId,after,limit);
+        exact(page.runId===selected.runId&&page.executionMode===selected.executionMode);
+        respond(response,200,NativeRunEventsSchema.parse(page),head);return true;
+      }
       if(segment[0]==='cases'&&segment[1]&&segment[2]==='inputs'&&segment.length===3){
         if([...url.searchParams.keys()].some(key=>!['manifestId','after','limit'].includes(key))||
           url.searchParams.getAll('manifestId').length>1||url.searchParams.getAll('after').length>1||url.searchParams.getAll('limit').length>1||
@@ -1428,7 +1447,8 @@ export function createWorkflowSpaceApiHandler(options:SpaceApiOptions){
           const filtered=search?summaries.filter(value=>`${value.title} ${value.id} ${value.schema.namespace}`.toLocaleLowerCase().includes(search.toLocaleLowerCase())):summaries;
           const listing=paged(filtered,url,value=>`${value.createdAt}\u0000${value.id}`,listScope('assets',JSON.stringify({caseId,runId,schema,search})),signer,now);
           const pageIds=new Set(listing.items.map(value=>value.id));
-          const pageRunIds=new Set(listing.items.flatMap(value=>value.sourceKind==='node'&&value.runId?[value.runId]:[]));
+          const pageRunIds=new Set(listing.items.flatMap(value=>
+            ['node','historical-artifact','external-artifact'].includes(value.sourceKind)&&value.runId?[value.runId]:[]));
           const producers=new Map<string,{id:string;nodeId?:string;round?:number}>();
           await Promise.all([...pageRunIds].map(async selectedRunId=>{
             const process=await authenticated.service.process(spaceId,selectedRunId);

@@ -21,6 +21,12 @@ describe('current run presentation', () => {
     expect(runStatusSummary(completedTrial)).toBe('已完成 · 1 项已保存产物');
     expect(runScopeExplanation(completedTrial)).toContain('不代表整个案例完成');
     expect(runScopeLabel({ executionMode: 'case' })).toBe('完整案例运行');
+    expect(runScopeLabel({ executionMode: 'imported' })).toBe('历史导入运行');
+    expect(runScopeExplanation({ executionMode: 'imported' })).toContain('没有重新调用模型');
+    expect(runScopeExplanation({ executionMode: 'imported' })).toContain('不计入本轮执行');
+    expect(runScopeLabel({ executionMode: 'external-host' })).toBe('本 Space 发起的领域运行');
+    expect(runScopeExplanation({ executionMode: 'external-host' })).toContain('真实运行记录');
+    expect(runScopeExplanation({ executionMode: 'external-host' })).toContain('不等于内容质量通过');
     expect(runScopeLabel({})).toBe('运行范围未记录');
     expect(runScopeLabel({ executionMode: 'future-mode' })).toBe('运行范围未知（future-mode）');
     expect(runScopeExplanation({ executionMode: 'future-mode' })).toContain('不能推断已完成整个案例');

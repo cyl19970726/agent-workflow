@@ -48,7 +48,7 @@ export function projectRunGraphAssets(view: ProcessView, manifest: InputManifest
     const node=occurrence.nodeId?nodes.get(occurrence.nodeId):undefined;
     if(!node)continue;
     for(const asset of versions){
-      if(asset.source.kind!=='historical-artifact'||asset.source.runId!==run.runId||
+      if((asset.source.kind!=='historical-artifact'&&asset.source.kind!=='external-artifact')||asset.source.runId!==run.runId||
         !occurrence.stepRunIds.includes(asset.source.stepRunId))continue;
       if(nodes.has(asset.id)){gaps.push(`Asset ID ${asset.id} conflicts with a method node`);continue;}
       if(!assets.has(asset.id))assets.set(asset.id,{id:asset.id,kind:'published-output',slots:[],schema:asset.schema,producerNodeId:node.id});
