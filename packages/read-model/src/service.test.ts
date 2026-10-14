@@ -65,6 +65,33 @@ describe("workflow read service", () => {
     expect(JSON.stringify(view)).not.toContain("raw unsafe error");
   });
 
+  it("exposes every technical step's metrics and updates them through the change cursor", async () => {
+    const store = new MemoryRunStore(); const root = await run(store);
+    const task = await store.createStep({ runId: root.id, key: "private-task-key", kind: "task", workflowId: "flow",
+      workflowRevision: "1", inputFingerprint: "private", configFingerprint: "private", state: "running", validation: "pending" });
+    const attempt = await store.createAttempt({ runId: root.id, stepRunId: task.id, state: "running" });
+    const start = await store.appendEvent({ runId: root.id, stepRunId: task.id, attemptId: attempt.id, type: "step.started" });
+    store.events.find(event => event.id === start.id)!.timestamp = "2026-01-01T00:00:00.000Z";
+    const service = createWorkflowReadService({ store });
+    const first = await service.getSnapshot({ rootRunId: root.id });
+    expect(first.stepMetrics[0]).toMatchObject({stepRunId: task.id, key: 'task 1', wallDurationMs: null,
+      usage: null, usageCoverage: "not_applicable"});
+    expect(JSON.stringify(first.stepMetrics)).not.toContain("private-task-key");
+    await store.updateStep(task.id, { state: "succeeded" });
+    await store.updateAttempt(attempt.id, { state: "succeeded" });
+    const end = await store.appendEvent({ runId: root.id, stepRunId: task.id, attemptId: attempt.id, type: "step.completed" });
+    store.events.find(event => event.id === end.id)!.timestamp = "2026-01-01T00:00:01.500Z";
+    const changed = await service.getChanges({ rootRunId: root.id, cursor: first.cursor });
+    expect(changed.resetRequired).toBe(false);
+    if (!changed.resetRequired) {
+      expect(changed.changed.stepMetrics[0]).toMatchObject({stepRunId: task.id,
+        wallDurationMs: 1500, sumAttemptDurationMs: 1500, observedAt: null, usage: null});
+      const unchanged = await service.getChanges({rootRunId: root.id, cursor: changed.cursor});
+      expect(unchanged.resetRequired).toBe(false);
+      if (!unchanged.resetRequired) expect(unchanged.changed.stepMetrics).toEqual([]);
+    }
+  });
+
   it("keeps repeated phase keys distinct, assigns nested child calls, and scopes a nested root", async () => {
     const store = new MemoryRunStore(); const batch = await run(store); const root = await run(store, batch.id, "batch-step");
     const left = await run(store, root.id, "left-step"); const right = await run(store, root.id, "right-step");

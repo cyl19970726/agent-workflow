@@ -79,7 +79,7 @@ npm run verify
 | `@signal-room/workflow-postgres` | PostgreSQL run/step/attempt/event/artifact 存储、JSON 正文读取与可选原子步骤提交；不含完整 harness、调度或 SDK runner |
 | `@signal-room/workflow-space-contracts` | JSON Schema 注册与依赖冻结、节点存储合同、字段视图与动作校验 |
 | `@signal-room/workflow-spaces` | PG 空间领域、版本与会话、受限 client/tools、core 桥接、评价比较和只读控制台 |
-| `@signal-room/workflow-agent-sdk` | 官方 Agents SDK `AgentRunner` 适配、应用自持 SIWC OAuth 与受限单请求传输；见包内 README 的已实现范围 |
+| `@signal-room/workflow-agent-sdk` | 官方 Agents SDK `AgentRunner`、SIWC Responses 传输；见包内 README 的已实现范围 |
 | `@signal-room/workflow-skill-snapshot` | Provider-independent skill bundle capture、validation 与 materialization；不调用 Agent 或安装全局 skills |
 | `@signal-room/workflow-read-model` | 服务端范围查询与安全投影；`/contracts` 是浏览器安全类型入口 |
 | `@signal-room/workflow-space-api` | Space 查询与受限业务命令的 HTTP 合同和服务适配 |

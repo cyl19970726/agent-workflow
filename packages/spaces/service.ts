@@ -1534,6 +1534,7 @@ export class WorkflowSpaceService {
       if(!boundIds.has(from.id)||!boundIds.has(to.id)) throw new Error('Historical relation endpoint was not bound to the run');
     }
     return projectProcess({run,contract,contractSource,resolver,steps,attempts,contexts,outputs,assets,
+      observedAt:new Date().toISOString(),
       relations:await queryRelationFacts(this.pool,spaceId,{runId,extra:resolver?.relations}),events,decisions});
   }
   /** Append a human declaration, optionally replacing one previous fact without deleting history. */

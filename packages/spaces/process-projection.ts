@@ -1,4 +1,5 @@
-import type { AttemptRecord, StepRecord, WorkflowEvent } from '@signal-room/workflow';
+import { projectStepMetrics, summarizeStepMetrics, type StepMetrics, type StepMetricsSummary,
+  type AttemptRecord, type StepRecord, type WorkflowEvent } from '@signal-room/workflow';
 import type { ProcessContract, ProcessContractDraft } from './process-contract.js';
 import type { AssetVersion, NodeContext, NodeOccurrenceAnnotation, SpaceRun, WorkflowVersion, ProcessDecisionObservation } from './types.js';
 import type { RelationProjection } from './relation.js';
@@ -29,6 +30,7 @@ export interface ProcessOccurrence {
   outputBindings: Array<{contextId:string;slot:string;assetVersionId:string}>;
   state: StepRecord['state']; phasePath?: readonly string[];
   inputs: Record<string,string>; outputs: Record<string,string[]>;
+  metrics: StepMetricsSummary;
   generatedByOccurrenceId?: string;
 }
 export interface ProcessView {
@@ -41,6 +43,8 @@ export interface ProcessView {
   relations: RelationProjection[];
   unmappedStepIds: string[];
   coverage: 'observed' | 'partial' | 'unknown';
+  stepMetrics: StepMetrics[];
+  metrics: StepMetricsSummary;
 }
 
 /** A business occurrence can span retries and a separate publication step. */
@@ -73,9 +77,12 @@ export function projectProcess(input: {
   run: SpaceRun; contract?: ProcessContract; contractSource: ProcessView['contractSource']; resolver?: HistoricalProcessResolution;
   steps: StepRecord[]; attempts: AttemptRecord[]; contexts: NodeContext[]; outputs: Array<{contextId:string;slot:string;versionId:string}>;
   assets: AssetVersion[]; relations: RelationProjection[]; events?: WorkflowEvent[]; decisions?:ProcessDecisionObservation[];
+  observedAt?: string;
 }): ProcessView {
   const {run,contract,contractSource,resolver,steps,attempts,contexts,outputs,assets}=input;
   const events=input.events??[];
+  const stepMetrics=projectStepMetrics(steps,attempts,events,input.observedAt??null);
+  const metricByStep=new Map(stepMetrics.map(metric=>[metric.stepRunId,metric]));
   const byStep=new Map<string,ProcessOccurrence>();
   const mapping=new Map(resolver?.mappings.map(item=>[item.stepRunId,item])??[]);
   const nodes=new Map(contract?.nodes.map(node=>[node.id,node])??[]);
@@ -101,7 +108,8 @@ export function projectProcess(input: {
       }),
       inputBindings:matching.flatMap(context=>Object.entries(context.inputs).map(([slot,input])=>({contextId:context.id,slot,assetVersionId:input.assetVersionId}))),
       outputBindings:outputs.filter(output=>matching.some(context=>context.id===output.contextId)).map(output=>({contextId:output.contextId,slot:output.slot,assetVersionId:output.versionId})),
-      state:step.state,...(step.phasePath?{phasePath:step.phasePath}:{}),inputs:{},outputs:{}};
+      state:step.state,...(step.phasePath?{phasePath:step.phasePath}:{}),inputs:{},outputs:{},
+      metrics:summarizeStepMetrics(stepMetrics.filter(metric=>metric.stepRunId===step.id))};
     for(const context of matching) for(const [slot,bound] of Object.entries(context.inputs)) occurrence.inputs[slot]=bound.assetVersionId;
     for(const output of outputs.filter(output=>matching.some(context=>context.id===output.contextId)))
       occurrence.outputs[output.slot]=[...(occurrence.outputs[output.slot]??[]),output.versionId];
@@ -148,7 +156,12 @@ export function projectProcess(input: {
     const step=stepById.get(context.stepRunId);
     return step?[[context.id,step] as const]:[];
   }));
-  for(const occurrence of occurrences) occurrence.state=occurrenceState(occurrence,nodes.get(occurrence.nodeId??''),contract,contextSteps);
+  for(const occurrence of occurrences) {
+    occurrence.state=occurrenceState(occurrence,nodes.get(occurrence.nodeId??''),contract,contextSteps);
+    occurrence.metrics=summarizeStepMetrics([...new Set(occurrence.stepRunIds)].flatMap(id=>{
+      const metric=metricByStep.get(id);return metric?[metric]:[];
+    }));
+  }
   const relations=[...input.relations];
   const assetById=new Map(assets.map(asset=>[asset.id,asset]));
   for(const occurrence of occurrences) {
@@ -189,5 +202,6 @@ export function projectProcess(input: {
     contract?.edges.some(edge=>edge.id===route.edgeId)).map(route=>({...route,provenance:'derived' as const}))];
   const unmappedStepIds=occurrences.filter(item=>!item.nodeId).flatMap(item=>item.stepRunIds);
   return {run,contract,contractSource,...(resolver?{resolverVersion:resolver.resolverVersion}:{}),occurrences,routes,relations,
+    stepMetrics,metrics:summarizeStepMetrics(stepMetrics),
     unmappedStepIds,coverage:!contract?'unknown':unmappedStepIds.length?'partial':occurrences.some(item=>item.provenance==='derived')?'partial':'observed'};
 }
