@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { ArtifactRef, RunStore, RunRecord, StepRecord, WorkflowEvent } from "@signal-room/workflow";
-import type { ArtifactIdentity, ArtifactRelation, AttemptView, CallView, FactState, RunView, SafeArtifact, StageView, WorkflowChanges, WorkflowReadService, WorkflowSnapshot, StageDetails } from "../contracts.js";
+import { projectStepMetrics, type ArtifactRef, type RunStore, type RunRecord, type StepRecord, type WorkflowEvent } from "@signal-room/workflow";
+import type { ArtifactIdentity, ArtifactRelation, AttemptView, CallView, FactState, RunView, SafeArtifact, StageView, StepMetricView, WorkflowChanges, WorkflowReadService, WorkflowSnapshot, StageDetails } from "../contracts.js";
 
 export interface ReadAdapters {
   /** All returned strings must already be safe for this authenticated viewer. */
   title?: (kind: "phase" | "call", id: string, record: StepRecord) => string | undefined;
   purpose?: (phase: StepRecord) => string | undefined;
   error?: (attemptId: string, error: string) => string | undefined;
+  /** A host-approved display name for a technical step; raw keys may contain private input. */
+  stepKey?: (step: StepRecord) => string | undefined;
   readerUrl?: (artifact: ArtifactRef) => string | undefined;
   /** Resolve only an exact referenced identity, after host authorization for this root. */
   externalArtifact?: (identity: ArtifactIdentity, root: RunRecord) => ArtifactRef | undefined | Promise<ArtifactRef | undefined>;
@@ -229,15 +231,29 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       artifactIds: selectedIds.length ? selectedIds : candidates.map(a => a.id),
     } : undefined;
     const readerStages = stages.filter(s => s.audience !== "audit");
-    return { schemaVersion: 1, rootRunId, cursor: "", runs: runViews, stages, calls, artifacts: safeArtifacts, relations,
+    return { schemaVersion: 1, rootRunId, cursor: "", runs: runViews, stages, calls, stepMetrics: [], artifacts: safeArtifacts, relations,
       progress: { registered: readerStages.length, completed: readerStages.filter(s => s.state === "succeeded").length,
         ...(plan?.planned !== undefined ? { planned: plan.planned } : {}), closed: plan?.closed ?? false }, ...(delivery ? { delivery } : {}), diagnostics };
   }
   async function snapshot(rootRunId: string, prior?: CursorEntry): Promise<{ dto: WorkflowSnapshot; watermarks: Record<string, number>; events: Map<string, WorkflowEvent[]> }> {
     const data = await collect(rootRunId, prior);
     const dto = await project(rootRunId, data);
+    const allSteps = [...data.steps.values()].flat();
+    const allAttempts = (await Promise.all(allSteps.map(step => store.listAttempts(step.id)))).flat();
+    dto.stepMetrics = projectStepMetrics(allSteps, allAttempts, [...data.events.values()].flat(), new Date().toISOString()).map((metric, index) => ({
+      stepRunId: metric.stepRunId, runId: metric.runId, kind: metric.kind, state: state(metric.state),
+      key: adapters.stepKey?.(allSteps[index]!) ?? `${metric.kind} ${index + 1}`,
+      startedAt: metric.startedAt, endedAt: metric.endedAt, observedAt: metric.observedAt,
+      elapsedSoFarMs: metric.elapsedSoFarMs, wallDurationMs: metric.wallDurationMs,
+      sumAttemptDurationMs: metric.sumAttemptDurationMs, usage: metric.usage, reportedTokens: metric.reportedTokens,
+      usageCoverage: metric.usageCoverage, attempts: metric.attempts.map(attempt => ({
+        id: attempt.id, state: state(attempt.state), startedAt: attempt.startedAt, endedAt: attempt.endedAt,
+        observedAt: attempt.observedAt, elapsedSoFarMs: attempt.elapsedSoFarMs, durationMs: attempt.durationMs,
+        usage: attempt.usage, reportedTokens: attempt.reportedTokens, usageCoverage: attempt.usageCoverage,
+      })),
+    } satisfies StepMetricView));
     for (const call of dto.calls) {
-      const attempts = await store.listAttempts(call.stepId);
+      const attempts = allAttempts.filter(attempt => attempt.stepRunId === call.stepId);
       const ev = data.events.get(call.runId) ?? [];
       call.attempts = attempts.map(a => {
         const own = ev.filter(e => e.attemptId === a.id);
@@ -267,8 +283,8 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
       const { dto, watermarks, events } = await snapshot(rootRunId, prior);
       const old = prior.snapshot;
       if (old.selectedRunId && dto.runs.some(r => r.id === old.selectedRunId)) dto.selectedRunId = old.selectedRunId;
-      const changed = { ...dto, runs: [] as RunView[], stages: [] as StageView[], calls: [] as CallView[], artifacts: [] as SafeArtifact[], relations: [] as ArtifactRelation[] };
-      const removed = { runs: [] as string[], stages: [] as string[], calls: [] as string[], artifacts: [] as string[] };
+      const changed = { ...dto, runs: [] as RunView[], stages: [] as StageView[], calls: [] as CallView[], stepMetrics: [] as StepMetricView[], artifacts: [] as SafeArtifact[], relations: [] as ArtifactRelation[] };
+      const removed = { runs: [] as string[], stages: [] as string[], calls: [] as string[], stepMetrics: [] as string[], artifacts: [] as string[] };
       for (const key of ["runs", "stages", "calls", "artifacts"] as const) {
         const getId = (item: RunView | StageView | CallView | SafeArtifact) => "identity" in item ? item.identity.id : item.id;
         const previous = new Map(old[key].map(item => [getId(item), JSON.stringify(item)]));
@@ -279,6 +295,13 @@ export function createWorkflowReadService({ store, adapters = {}, maxCursors = 6
         }
         removed[key] = [...previous.keys()].filter(id => !current.has(id));
       }
+      const priorMetrics = new Map(old.stepMetrics.map(metric => [metric.stepRunId, JSON.stringify(metric)]));
+      const currentMetrics = new Set<string>();
+      for (const metric of dto.stepMetrics) {
+        currentMetrics.add(metric.stepRunId);
+        if (priorMetrics.get(metric.stepRunId) !== JSON.stringify(metric)) changed.stepMetrics.push(metric);
+      }
+      removed.stepMetrics = [...priorMetrics.keys()].filter(id => !currentMetrics.has(id));
       // Relations are a small authoritative set. Include the complete set so removal
       // (for example, a hash invalidation) converges without a separate relation ID.
       changed.relations = dto.relations;

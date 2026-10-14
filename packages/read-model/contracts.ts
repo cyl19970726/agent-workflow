@@ -6,6 +6,15 @@ export interface SafeArtifact { identity: ArtifactIdentity; type: string; schema
 export interface ArtifactRelation { kind: "consumed" | "produced" | "reviews" | "revises" | "supersedes" | "selected"; from: ArtifactIdentity; to: ArtifactIdentity; reason?: string; validity: "valid" | "missing" | "mismatch" }
 export interface RunView { id: string; parentRunId?: string; parentStepId?: string; workflowId: string; state: ReadState; childRunIds: string[]; diagnostic?: "missing_parent" | "cycle" }
 export interface AttemptView { id: string; state: ReadState; error?: string; startedAt?: string; endedAt?: string; usage?: { inputTokens?: number; cachedInputTokens?: number; outputTokens?: number } }
+export interface TokenMetricsView { inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null; reasoningOutputTokens: number | null; totalTokens: number | null }
+export interface StepMetricView { stepRunId: string; runId: string; kind: string; state: ReadState; key: string;
+  startedAt: string | null; endedAt: string | null; observedAt: string | null; elapsedSoFarMs: number | null;
+  wallDurationMs: number | null; sumAttemptDurationMs: number | null;
+  usage: TokenMetricsView | null; reportedTokens: TokenMetricsView | null;
+  usageCoverage: "complete" | "partial" | "unavailable" | "not_applicable";
+  attempts: { id: string; state: ReadState; startedAt: string | null; endedAt: string | null; observedAt: string | null;
+    elapsedSoFarMs: number | null; durationMs: number | null; usage: TokenMetricsView | null;
+    reportedTokens: TokenMetricsView | null; usageCoverage: "complete" | "partial" | "unavailable" | "not_applicable" }[] }
 export interface CallView { id: string; runId: string; stepId: string; phaseId?: string; role: "agent" | "workflow"; state: ReadState; validation: FactState; title?: string; model?: string; reasoningEffort?: string; methodRevision?: string; methodDigest?: string; inputArtifactIds: string[]; reused: boolean; retryOf?: string; retryReason?: string; attempts: AttemptView[]; artifactIds: string[]; childRunIds: string[] }
 export interface StageView {
   id: string; phaseKey: string; runId: string; path: string[]; audience?: "reader" | "audit";
@@ -18,7 +27,7 @@ export interface StageView {
 }
 export interface ProgressView { registered: number; completed: number; planned?: number; closed: boolean }
 export interface DeliveryView { state: "missing" | "unknown" | "ambiguous" | "selected"; artifactIds: string[] }
-export interface WorkflowSnapshot { schemaVersion: 1; rootRunId: string; selectedRunId?: string; cursor: string; runs: RunView[]; stages: StageView[]; calls: CallView[]; artifacts: SafeArtifact[]; relations: ArtifactRelation[]; progress: ProgressView; delivery?: DeliveryView; diagnostics: string[] }
-export type WorkflowChanges = { resetRequired: true } | { resetRequired: false; cursor: string; changed: WorkflowSnapshot; removed: { runs: string[]; stages: string[]; calls: string[]; artifacts: string[] } };
+export interface WorkflowSnapshot { schemaVersion: 1; rootRunId: string; selectedRunId?: string; cursor: string; runs: RunView[]; stages: StageView[]; calls: CallView[]; stepMetrics: StepMetricView[]; artifacts: SafeArtifact[]; relations: ArtifactRelation[]; progress: ProgressView; delivery?: DeliveryView; diagnostics: string[] }
+export type WorkflowChanges = { resetRequired: true } | { resetRequired: false; cursor: string; changed: WorkflowSnapshot; removed: { runs: string[]; stages: string[]; calls: string[]; stepMetrics: string[]; artifacts: string[] } };
 export interface StageDetails { phaseId: string; calls: CallView[]; artifacts: SafeArtifact[]; nextCursor?: string }
 export interface WorkflowReadService { getSnapshot(input: { rootRunId: string; selectedRunId?: string }): Promise<WorkflowSnapshot>; getChanges(input: { rootRunId: string; cursor: string }): Promise<WorkflowChanges>; getStageDetails(input: { rootRunId: string; phaseId: string; cursor?: string; limit?: number }): Promise<StageDetails> }

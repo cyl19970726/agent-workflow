@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { artifactPayloadSha256, runWorkflow } from "@signal-room/workflow";
+import { artifactPayloadSha256, projectStepMetrics, runWorkflow } from "@signal-room/workflow";
 import type { ArtifactDraft, WorkflowContext } from "@signal-room/workflow";
 import { migratePostgresWorkflowStore, PostgresWorkflowRunStore } from "./postgres-run-store.js";
 
@@ -150,5 +150,64 @@ suite("PostgreSQL workflow ledger", () => {
     expect((await reopened.listArtifacts(first.run.id))).toHaveLength(1);
     expect((await reopened.listEvents(first.run.id)).some((event) => event.type === "step.reused")).toBe(true);
     await secondPool.end();
+  });
+
+  it("preserves agent duration and token coverage across PostgreSQL reopen and replay", async () => {
+    const id = workspace();
+    const store = makeStore(id);
+    const definition = { id: "metrics-agent", revision: "1", model: "mock", reasoningEffort: "low",
+      promptRevision: "1", skillsRevision: "1", permissionsRevision: "1" };
+    const workflow = { id: "metrics-replay", revision: "1",
+      execute: (ctx: WorkflowContext) => ctx.agent("draft", definition, { text: "input" }) };
+    let calls = 0;
+    const runner = { run: async (request: { emit: (type: string, data?: unknown) => Promise<void> }) => {
+      calls++;
+      await request.emit("siwc.request", { requestId: "request-1" });
+      const response = { responseId: "response-1", usage: { input_tokens: 12, output_tokens: 5, total_tokens: 17,
+        input_tokens_details: { cached_tokens: 3 }, output_tokens_details: { reasoning_tokens: 2 } } };
+      await request.emit("siwc.response", response);
+      await request.emit("siwc.response", response); // a repeated persisted report must count only once
+      return { output: { text: "draft" }, validation: "valid" as const };
+    } };
+    const first = await runWorkflow({ workflow, input: null, store, agentRunner: runner });
+    const secondPool = new Pool({ connectionString: url! });
+    try {
+      const reopened = new PostgresWorkflowRunStore(secondPool, { workspaceId: id });
+      const read = async () => {
+        const steps = await reopened.listSteps(first.run.id);
+        const attempts = (await Promise.all(steps.map(step => reopened.listAttempts(step.id)))).flat();
+        return projectStepMetrics(steps, attempts, await reopened.listEvents(first.run.id), new Date().toISOString());
+      };
+      const beforeReplay = await read();
+      expect(beforeReplay).toHaveLength(1);
+      expect(beforeReplay[0]).toMatchObject({ kind: "agent", usageCoverage: "complete",
+        usage: { inputTokens: 12, cachedInputTokens: 3, outputTokens: 5,
+          reasoningOutputTokens: 2, totalTokens: 17 } });
+      expect(beforeReplay[0]!.wallDurationMs).toBeGreaterThanOrEqual(0);
+      expect(beforeReplay[0]!.sumAttemptDurationMs).toBeGreaterThanOrEqual(0);
+      expect(beforeReplay[0]!.attempts).toHaveLength(1);
+      const replay = await runWorkflow({ workflow, input: null, store: reopened, agentRunner: runner,
+        resumeRunId: first.run.id });
+      expect(replay.output).toEqual(first.output);
+      expect(calls).toBe(1);
+      expect(await read()).toEqual(beforeReplay);
+
+      const failed = { id: "metrics-failure", revision: "1",
+        execute: (ctx: WorkflowContext) => ctx.agent("unreported", definition, { text: "input" }) };
+      await expect(runWorkflow({ workflow: failed, input: null, store: reopened,
+        agentRunner: { run: async (request: { emit: (type: string, data?: unknown) => Promise<void> }) => {
+          await request.emit("siwc.request", { requestId: "unreported" });
+          throw new Error("model failed before usage");
+        } } })).rejects.toThrow("model failed before usage");
+      const failedRun = (await reopened.listRuns()).find(run => run.workflowId === failed.id)!;
+      const failedSteps = await reopened.listSteps(failedRun.id);
+      const failedAttempts = await reopened.listAttempts(failedSteps[0]!.id);
+      const [unknown] = projectStepMetrics(failedSteps, failedAttempts, await reopened.listEvents(failedRun.id),
+        new Date().toISOString());
+      expect(unknown).toMatchObject({ state: "failed", usageCoverage: "unavailable", usage: null,
+        reportedTokens: null, attempts: [{ state: "failed", usageCoverage: "unavailable" }] });
+    } finally {
+      await secondPool.end();
+    }
   });
 });

@@ -4,6 +4,7 @@ import { Agent, Runner, tool as sdkTool, Usage,
 import type { AgentRunRequest, AgentRunResult, AgentRunner } from "@signal-room/workflow";
 import { artifactPayloadSha256 } from "@signal-room/workflow";
 import type { SiwcAuth } from "./auth.js";
+import { inlineImageHash, measureRequestPayload } from "./request-payload-metrics.js";
 
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
 const JSON_OBJECT_REQUIREMENT = "The final response must be a valid JSON object.";
@@ -43,13 +44,13 @@ function safeProviderFailure(eventType: string, response: Response, event: {
 type TransportPhase = "fetch" | "stream";
 const RETRYABLE_TRANSPORT_CODES = new Set(["UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
   "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "EAI_AGAIN", "ENETUNREACH",
-  "UND_ERR_CONNECT_TIMEOUT", "SIWC_HEADER_TIMEOUT", "SIWC_STREAM_IDLE_TIMEOUT", "SIWC_STREAM_PREMATURE_EOF"]);
+  "UND_ERR_CONNECT_TIMEOUT", "SIWC_HEADER_TIMEOUT", "SIWC_STREAM_IDLE_TIMEOUT", "SIWC_REQUEST_TIMEOUT", "SIWC_STREAM_PREMATURE_EOF"]);
 const DIAGNOSTIC_TRANSPORT_CODES = new Set([...RETRYABLE_TRANSPORT_CODES, "ENOTFOUND", "EHOSTUNREACH",
   "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT"]);
 const MAX_SERVER_RETRY_DELAY_MS = 2_000;
 const DEFAULT_ACTIVITY_TIMEOUT_MS = 180_000;
 const STREAM_PROGRESS_INTERVAL_MS = 15_000;
-function activityTimeout(code: "SIWC_HEADER_TIMEOUT" | "SIWC_STREAM_IDLE_TIMEOUT"): Error & { code: string } {
+function activityTimeout(code: "SIWC_HEADER_TIMEOUT" | "SIWC_STREAM_IDLE_TIMEOUT" | "SIWC_REQUEST_TIMEOUT"): Error & { code: string } {
   return Object.assign(new Error(code), { code });
 }
 class SiwcTransportFailure extends Error {
@@ -135,6 +136,8 @@ export interface SiwcRunnerOptions {
   headerTimeoutMs?: number;
   /** Maximum gap between response stream chunks; defaults to 180 seconds. */
   streamIdleTimeoutMs?: number;
+  /** Maximum time from each physical POST to its completed response; unset by default. */
+  requestTimeoutMs?: number;
   validateOutput?: (output: unknown, request: AgentRunRequest<unknown>) => unknown | Promise<unknown>;
   /** Optional same-session technical correction; omitted consumers retain fail-fast behavior. */
   maxOutputValidationCorrections?: number;
@@ -168,8 +171,10 @@ export class OpenAIAgentsSdkRunner implements AgentRunner {
     if (!Number.isSafeInteger(corrections) || corrections < 0 || corrections > 3) throw new Error("Invalid SIWC maxOutputValidationCorrections");
     this.maxOutputValidationCorrections = corrections;
     for (const [name, value] of [["headerTimeoutMs", options.headerTimeoutMs],
-      ["streamIdleTimeoutMs", options.streamIdleTimeoutMs]] as const) {
-      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) throw new Error(`Invalid SIWC ${name}`);
+      ["streamIdleTimeoutMs", options.streamIdleTimeoutMs], ["requestTimeoutMs", options.requestTimeoutMs]] as const) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 ||
+        name === "requestTimeoutMs" && value > 2_147_483_647))
+        throw new Error(`Invalid SIWC ${name}`);
     }
   }
 
@@ -276,6 +281,8 @@ export class OpenAIAgentsSdkRunner implements AgentRunner {
         const body = { model: request.definition.model, input, instructions: modelRequest.systemInstructions,
           reasoning: { effort }, store: false, stream: true,
           ...(jsonObjectMode ? { text: { format: { type: "json_object" as const } } } : {}) };
+        const serializedBody = JSON.stringify(body);
+        const requestPayloadMetrics = measureRequestPayload(body, serializedBody);
         let completed: Completed | undefined;
         let requestAttempt = 0;
         let retryBudgetUsed = 0;
@@ -317,65 +324,78 @@ export class OpenAIAgentsSdkRunner implements AgentRunner {
           }
           request.signal.throwIfAborted();
           requestAttempt++;
-          await request.emit("siwc.request", { ...SDK_RUNTIME, turn: turns, inputItems: input.length, requestAttempt });
-          let response: Response;
-          const headerController = new AbortController();
-          const headerSignal = AbortSignal.any([request.signal, modelRequest.signal, headerController.signal]
+          await request.emit("siwc.request", { ...SDK_RUNTIME, turn: turns, inputItems: input.length, requestAttempt,
+            ...requestPayloadMetrics });
+          const deadlineController = new AbortController();
+          const deadlineTimer = this.options.requestTimeoutMs === undefined ? undefined
+            : setTimeout(() => deadlineController.abort(activityTimeout("SIWC_REQUEST_TIMEOUT")), this.options.requestTimeoutMs);
+          const stopDeadline = () => { if (deadlineTimer) clearTimeout(deadlineTimer); };
+          const postSignal = AbortSignal.any([request.signal, modelRequest.signal, deadlineController.signal]
             .filter((signal): signal is AbortSignal => signal !== undefined));
-          const sentAt = Date.now();
-          const headerTimer = setTimeout(() => headerController.abort(activityTimeout("SIWC_HEADER_TIMEOUT")),
-            this.options.headerTimeoutMs ?? DEFAULT_ACTIVITY_TIMEOUT_MS);
           try {
-            response = await awaitWithAbort(headerSignal, () => this.http(RESPONSES_URL, { method: "POST", signal: headerSignal, headers: {
-              "authorization": `Bearer ${token}`, "content-type": "application/json", "accept": "text/event-stream",
-            }, body: JSON.stringify(body) }));
-          } catch (error) {
-            await handleTransportFailure(new SiwcTransportFailure("fetch", error));
-            if (authRetry > 0) refreshedToken = token;
-            continue;
-          } finally { clearTimeout(headerTimer); }
-          const requestId = safeField(response.headers.get("x-request-id"), /^[a-zA-Z0-9_-]{1,128}$/);
-          await request.emit("siwc.response_headers", { turn: turns, requestAttempt, status: response.status,
-            ...(requestId ? { requestId } : {}), elapsedMs: Date.now() - sentAt });
-          if (!response.ok) {
-            await request.emit("siwc.provider_error", { eventType: "http.error", status: response.status,
-              ...(requestId ? { requestId } : {}) });
-            if (response.status === 401 && authRetry === 0 && this.options.auth.refreshAfterUnauthorized) {
-              await response.body?.cancel().catch(() => undefined);
-              try { refreshedToken = await awaitWithAbort(request.signal, () => this.options.auth.refreshAfterUnauthorized!(token)); }
-              catch (error) {
-                await request.emit("siwc.pre_request_error", { turn: turns, phase: "auth_refresh", status: 401,
-                  ...(requestId ? { requestId } : {}),
-                  ...(transportErrorName(error) ? { errorName: transportErrorName(error) } : {}),
-                  ...(safeField((error as { code?: unknown } | null)?.code) ?
-                    { causeCode: safeField((error as { code?: unknown }).code) } : {}) });
-                throw error;
-              }
-              authRetry++;
-              await request.emit("siwc.auth_refreshed", { reason: "http_401", requestAttempt: requestAttempt + 1 });
-              continue;
-            }
-            const delay = response.status >= 500 && retryBudgetUsed < 1
-              ? serverRetryDelay(response.headers) : undefined;
-            if (delay !== undefined) {
-              retryBudgetUsed++;
-              void response.body?.cancel().catch(() => undefined);
-              await request.emit("siwc.provider_retry", { turn: turns, requestAttempt, status: response.status,
-                ...(requestId ? { requestId } : {}), delayMs: delay });
-              await waitForRetry(delay, [request.signal, modelRequest.signal]);
+            let response: Response;
+            const headerController = new AbortController();
+            const headerSignal = AbortSignal.any([postSignal, headerController.signal]);
+            const sentAt = Date.now();
+            const headerTimer = setTimeout(() => headerController.abort(activityTimeout("SIWC_HEADER_TIMEOUT")),
+              this.options.headerTimeoutMs ?? DEFAULT_ACTIVITY_TIMEOUT_MS);
+            try {
+              response = await awaitWithAbort(headerSignal, () => this.http(RESPONSES_URL, { method: "POST", signal: headerSignal, headers: {
+                "authorization": `Bearer ${token}`, "content-type": "application/json", "accept": "text/event-stream",
+              }, body: serializedBody }));
+            } catch (error) {
+              stopDeadline();
+              await handleTransportFailure(new SiwcTransportFailure("fetch", error));
               if (authRetry > 0) refreshedToken = token;
               continue;
+            } finally { clearTimeout(headerTimer); }
+            if (!response.ok) stopDeadline();
+            const requestId = safeField(response.headers.get("x-request-id"), /^[a-zA-Z0-9_-]{1,128}$/);
+            await request.emit("siwc.response_headers", { turn: turns, requestAttempt, status: response.status,
+              ...(requestId ? { requestId } : {}), elapsedMs: Date.now() - sentAt });
+            if (!response.ok) {
+              await request.emit("siwc.provider_error", { eventType: "http.error", status: response.status,
+                ...(requestId ? { requestId } : {}) });
+              if (response.status === 401 && authRetry === 0 && this.options.auth.refreshAfterUnauthorized) {
+                await response.body?.cancel().catch(() => undefined);
+                try { refreshedToken = await awaitWithAbort(request.signal, () => this.options.auth.refreshAfterUnauthorized!(token)); }
+                catch (error) {
+                  await request.emit("siwc.pre_request_error", { turn: turns, phase: "auth_refresh", status: 401,
+                    ...(requestId ? { requestId } : {}),
+                    ...(transportErrorName(error) ? { errorName: transportErrorName(error) } : {}),
+                    ...(safeField((error as { code?: unknown } | null)?.code) ?
+                      { causeCode: safeField((error as { code?: unknown }).code) } : {}) });
+                  throw error;
+                }
+                authRetry++;
+                await request.emit("siwc.auth_refreshed", { reason: "http_401", requestAttempt: requestAttempt + 1 });
+                continue;
+              }
+              const delay = response.status >= 500 && retryBudgetUsed < 1
+                ? serverRetryDelay(response.headers) : undefined;
+              if (delay !== undefined) {
+                retryBudgetUsed++;
+                void response.body?.cancel().catch(() => undefined);
+                await request.emit("siwc.provider_retry", { turn: turns, requestAttempt, status: response.status,
+                  ...(requestId ? { requestId } : {}), delayMs: delay });
+                await waitForRetry(delay, [request.signal, modelRequest.signal]);
+                if (authRetry > 0) refreshedToken = token;
+                continue;
+              }
+              throw new Error(`SIWC Responses request failed (${response.status}); requestId=${requestId ?? "unknown"}`);
             }
-            throw new Error(`SIWC Responses request failed (${response.status}); requestId=${requestId ?? "unknown"}`);
-          }
-          try { completed = await consumeEvents(response, request, modelRequest.signal,
-            this.options.streamIdleTimeoutMs ?? DEFAULT_ACTIVITY_TIMEOUT_MS,
-            async (bytesRead, eventCount, elapsedMs) => request.emit("siwc.stream_progress", {
-              turn: turns, requestAttempt, bytesRead, eventCount, elapsedMs })); }
-          catch (error) {
-            if (!(error instanceof SiwcTransportFailure)) throw error;
-            await handleTransportFailure(error);
-            if (authRetry > 0) refreshedToken = token;
+            try { completed = await consumeEvents(response, request, postSignal,
+              this.options.streamIdleTimeoutMs ?? DEFAULT_ACTIVITY_TIMEOUT_MS,
+              async (bytesRead, eventCount, elapsedMs) => request.emit("siwc.stream_progress", {
+                turn: turns, requestAttempt, bytesRead, eventCount, elapsedMs }), stopDeadline); }
+            catch (error) {
+              stopDeadline();
+              if (!(error instanceof SiwcTransportFailure)) throw error;
+              await handleTransportFailure(error);
+              if (authRetry > 0) refreshedToken = token;
+            }
+          } finally {
+            stopDeadline();
           }
         }
         responseId = completed.id;
@@ -517,7 +537,7 @@ function toWireInput(item: AgentInputItem, rawItems: Map<string, ResponseItem>, 
 
 function imageHash(image: SiwcImage): string {
   validateImage(image);
-  return sha(`${image.mimeType}:${image.base64}`);
+  return inlineImageHash(image.mimeType, image.base64);
 }
 function imageContent(image: SiwcImage): ResponseItem {
   validateImage(image);
@@ -536,7 +556,8 @@ function isVisualResult(value: Json | SiwcVisualToolResult): value is SiwcVisual
 }
 
 async function consumeEvents<Input>(response: Response, request: AgentRunRequest<Input>, modelSignal: AbortSignal | undefined,
-  idleTimeoutMs: number, progress: (bytesRead: number, eventCount: number, elapsedMs: number) => Promise<void>): Promise<Completed> {
+  idleTimeoutMs: number, progress: (bytesRead: number, eventCount: number, elapsedMs: number) => Promise<void>,
+  onCompleted?: () => void): Promise<Completed> {
   if (!response.body) throw new Error("SIWC response has no stream");
   let buffer = "";
   let complete: Completed | undefined;
@@ -597,7 +618,14 @@ async function consumeEvents<Input>(response: Response, request: AgentRunRequest
           const key = `${event.output_index ?? 0}:${event.content_index ?? 0}`;
           textDeltas.set(key, event.text);
         }
-        if (event.type === "response.completed") { complete = event.response; break; }
+        if (event.type === "response.completed") {
+          const aborted = request.signal.aborted ? request.signal : modelSignal?.aborted ? modelSignal : undefined;
+          if (aborted) throw new SiwcTransportFailure("stream", aborted.reason, response.status,
+            safeField(response.headers.get("x-request-id"), /^[a-zA-Z0-9_-]{1,128}$/), bytes, emittedText);
+          complete = event.response;
+          if (complete) onCompleted?.();
+          break;
+        }
         if (event.type === "response.failed" || event.type === "response.incomplete" || event.type === "error") {
           const failure = safeProviderFailure(event.type, response, event);
           await request.emit("siwc.provider_error", failure);
