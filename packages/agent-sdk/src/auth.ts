@@ -77,28 +77,45 @@ export class SiwcAuth {
       if (!selected) throw new Error("Continue with ChatGPT is required. Run workflow-siwc login.");
       if (!selected.scopes.includes("chatgpt.tokens.use.direct")) throw new Error("ChatGPT plan usage is no longer authorized.");
       if (Date.now() + 90_000 < selected.expiresAt) return selected.accessToken;
-      if (!selected.refreshToken) throw new Error("ChatGPT connection expired; run workflow-siwc login.");
-      let tokens: TokenResult;
-      try {
-        tokens = await this.tokenRequest(new URLSearchParams({ grant_type: "refresh_token", client_id: selected.clientId,
-          refresh_token: selected.refreshToken, resource: RESOURCE }));
-      } catch (error) {
-        if (error instanceof SiwcTokenError && expiredRefreshCodes.has(error.code)) {
-          await this.save({ hostId: current!.hostId, registrationClientId: selected.clientId });
-          throw new Error("ChatGPT session expired; run workflow-siwc login.");
-        }
-        throw error;
-      }
-      if (!tokens.access_token || !tokens.refresh_token || !tokens.scope || tokens.token_type?.toLowerCase() !== "bearer" || !tokens.expires_in) {
-        throw new Error("Incomplete ChatGPT token refresh; credentials were preserved.");
-      }
-      const scopes = tokens.scope.split(/\s+/).filter(Boolean);
-      const next = { ...selected, accessToken: tokens.access_token, refreshToken: tokens.refresh_token,
-        scopes, expiresAt: Date.now() + tokens.expires_in * 1000 };
-      await this.save({ hostId: current!.hostId, profile: next });
-      if (!scopes.includes("chatgpt.tokens.use.direct")) throw new Error("ChatGPT plan usage is no longer authorized.");
-      return next.accessToken;
+      return this.refreshLocked(current!, selected);
     });
+  }
+
+  /** Refresh a token rejected by the Responses endpoint, coordinating rotation across processes. */
+  async refreshAfterUnauthorized(rejectedAccessToken: string): Promise<string> {
+    return this.withCredentialLock(async () => {
+      const current = await this.load();
+      const selected = current?.profile;
+      if (!selected) throw new Error("Continue with ChatGPT is required. Run workflow-siwc login.");
+      if (!selected.scopes.includes("chatgpt.tokens.use.direct")) throw new Error("ChatGPT plan usage is no longer authorized.");
+      // Another runner may already have rotated the credential while this request was in flight.
+      if (selected.accessToken !== rejectedAccessToken && Date.now() + 90_000 < selected.expiresAt) return selected.accessToken;
+      return this.refreshLocked(current!, selected);
+    });
+  }
+
+  private async refreshLocked(current: Stored, selected: SiwcProfile): Promise<string> {
+    if (!selected.refreshToken) throw new Error("ChatGPT connection expired; run workflow-siwc login.");
+    let tokens: TokenResult;
+    try {
+      tokens = await this.tokenRequest(new URLSearchParams({ grant_type: "refresh_token", client_id: selected.clientId,
+        refresh_token: selected.refreshToken, resource: RESOURCE }));
+    } catch (error) {
+      if (error instanceof SiwcTokenError && expiredRefreshCodes.has(error.code)) {
+        await this.save({ hostId: current.hostId, registrationClientId: selected.clientId });
+        throw new Error("ChatGPT session expired; run workflow-siwc login.");
+      }
+      throw error;
+    }
+    if (!tokens.access_token || !tokens.refresh_token || !tokens.scope || tokens.token_type?.toLowerCase() !== "bearer" || !tokens.expires_in) {
+      throw new Error("Incomplete ChatGPT token refresh; credentials were preserved.");
+    }
+    const scopes = tokens.scope.split(/\s+/).filter(Boolean);
+    const next = { ...selected, accessToken: tokens.access_token, refreshToken: tokens.refresh_token,
+      scopes, expiresAt: Date.now() + tokens.expires_in * 1000 };
+    await this.save({ hostId: current.hostId, profile: next });
+    if (!scopes.includes("chatgpt.tokens.use.direct")) throw new Error("ChatGPT plan usage is no longer authorized.");
+    return next.accessToken;
   }
 
   async login(options: { openUrl: (url: string) => Promise<void>; signal?: AbortSignal }): Promise<ReturnType<SiwcAuth["status"]> extends Promise<infer T> ? T : never> {

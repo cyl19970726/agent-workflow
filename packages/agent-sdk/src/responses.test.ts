@@ -62,7 +62,8 @@ describe("OpenAIAgentsSdkRunner", () => {
     await Promise.resolve();
 
     expect(fetch).not.toHaveBeenCalled();
-    expect(events).toEqual([]);
+    expect(events.map(event => event.type)).toEqual(["siwc.started"]);
+    expect(JSON.stringify(events)).not.toContain("late-token");
   });
 
   it("returns on external cancellation while a request gate hangs and ignores its late release", async () => {
@@ -358,6 +359,87 @@ describe("OpenAIAgentsSdkRunner", () => {
     expect(JSON.stringify(events)).not.toContain("secret-token");
   });
 
+  it("reacquires the SIWC access token on each turn of a long-running agent", async () => {
+    let tokenExpired = false;
+    const accessToken = vi.fn(async () => tokenExpired ? "rotated-token" : "starting-token");
+    const authorization: string[] = [];
+    const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      authorization.push(new Headers(init?.headers).get("authorization") ?? "");
+      if (authorization.length === 1) {
+        // Simulate the first response taking the run past the cached token's lifetime.
+        tokenExpired = true;
+        return stream([{ type: "response.completed", response: { output: [{ type: "function_call",
+          name: "read_evidence", call_id: "call-1", arguments: "{}" }] } }]);
+      }
+      return stream([{ type: "response.completed", response: { output: [{ type: "message",
+        content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken }, fetch,
+      tools: () => [{ name: "read_evidence", description: "Read frozen evidence", parameters: { type: "object" },
+        execute: async () => ({ read: true }) }] });
+
+    expect((await runner.run(request([]))).output).toBe("Done");
+    expect(accessToken).toHaveBeenCalledTimes(2); // one fresh lookup immediately before each POST
+    expect(authorization).toEqual(["Bearer starting-token", "Bearer rotated-token"]);
+  });
+
+  it("retries a single HTTP 401 with the newly rotated SIWC token", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const authorization: string[] = [];
+    const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      authorization.push(new Headers(init?.headers).get("authorization") ?? "");
+      return authorization.length === 1
+        ? new Response("private unauthorized body", { status: 401, headers: { "x-request-id": "req_401_once" } })
+        : stream([{ type: "response.completed", response: { output: [{ type: "message",
+          content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const refreshAfterUnauthorized = vi.fn(async () => "fresh-token");
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "rejected-token", refreshAfterUnauthorized }, fetch });
+
+    expect((await runner.run(request(events))).output).toBe("Done");
+    expect(authorization).toEqual(["Bearer rejected-token", "Bearer fresh-token"]);
+    expect(refreshAfterUnauthorized).toHaveBeenCalledOnce();
+    expect(events.find(event => event.type === "siwc.auth_refreshed")?.data).toEqual({ reason: "http_401", requestAttempt: 2 });
+    expect(events.some(event => event.type === "siwc.response")).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("rejected-token");
+    expect(JSON.stringify(events)).not.toContain("fresh-token");
+    expect(JSON.stringify(events)).not.toContain("private unauthorized body");
+  });
+
+  it("refreshes and retries one rejected SIWC request, counts both posts, and never loops on a second 401", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const authorization: string[] = [];
+    const refreshAfterUnauthorized = vi.fn(async (rejected: string) => {
+      expect(rejected).toBe("rejected-token");
+      return "refreshed-token";
+    });
+    const beforeRequest = vi.fn(async () => {});
+    const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      authorization.push(new Headers(init?.headers).get("authorization") ?? "");
+      if (authorization.length <= 2) return new Response("private unauthorized body", {
+        status: 401, headers: { "x-request-id": `req_401_${authorization.length}` }
+      });
+      return stream([{ type: "response.completed", response: { output: [{ type: "message",
+        content: [{ type: "output_text", text: "unreachable" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "rejected-token", refreshAfterUnauthorized },
+      beforeRequest, fetch });
+
+    await expect(runner.run(request(events))).rejects.toThrow("SIWC Responses request failed (401)");
+    expect(authorization).toEqual(["Bearer rejected-token", "Bearer refreshed-token"]);
+    expect(refreshAfterUnauthorized).toHaveBeenCalledOnce();
+    expect(beforeRequest).toHaveBeenCalledTimes(2);
+    expect(events.filter(event => event.type === "siwc.request")).toHaveLength(2);
+    expect(events.find(event => event.type === "siwc.auth_refreshed")?.data).toEqual({ reason: "http_401", requestAttempt: 2 });
+    expect(events.filter(event => event.type === "siwc.provider_error").map(event => event.data)).toEqual([
+      { eventType: "http.error", status: 401, requestId: "req_401_1" },
+      { eventType: "http.error", status: 401, requestId: "req_401_2" },
+    ]);
+    expect(JSON.stringify(events)).not.toContain("rejected-token");
+    expect(JSON.stringify(events)).not.toContain("refreshed-token");
+    expect(JSON.stringify(events)).not.toContain("private unauthorized body");
+  });
+
   it("assembles streamed function calls and text when response.completed omits output", async () => {
     const bodies: { input: { type?: string; arguments?: string; output?: string }[] }[] = [];
     const http = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
@@ -394,9 +476,13 @@ describe("OpenAIAgentsSdkRunner", () => {
     const limited = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch: http as typeof fetch,
       tools: () => [{ name: "danger", description: "test", parameters: {}, execute: async () => null }], maxTurns: 1 });
     await expect(limited.run(request([]))).rejects.toThrow("limit exceeded");
+    const interruptedFetch = vi.fn(async () => stream([{ type: "response.output_text.delta", delta: "partial" }]));
     const interrupted = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
-      fetch: vi.fn(async () => stream([{ type: "response.output_text.delta", delta: "partial" }])) as typeof fetch });
-    await expect(interrupted.run(request([]))).rejects.toThrow("without response.completed");
+      fetch: interruptedFetch as typeof fetch });
+    const interruptedEvents: { type: string; data?: unknown }[] = [];
+    await expect(interrupted.run(request(interruptedEvents))).rejects.toThrow("SIWC_TRANSPORT_FAILURE:stream:SIWC_STREAM_PREMATURE_EOF");
+    expect(interruptedFetch).toHaveBeenCalledOnce();
+    expect(interruptedEvents.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({ retrying: false });
   });
 
   it("records only safe provider identifiers from a stream error", async () => {
@@ -453,5 +539,500 @@ describe("OpenAIAgentsSdkRunner", () => {
     await expect(streamed.run(request(streamedEvents))).rejects.toThrow("SIWC stream error: unknown");
     expect(streamedEvents.find(event => event.type === "siwc.provider_error")?.data).toEqual({ eventType: "error" });
     expect(JSON.stringify(streamedEvents)).not.toContain("secret-token");
+  });
+
+  it("retries one broken fetch on the same turn, gates both posts, and records only safe diagnostics", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const gate = vi.fn(async () => {});
+    const fetch = vi.fn(async () => {
+      if (fetch.mock.calls.length === 1) throw new TypeError("terminated", { cause: {
+        code: "UND_ERR_SOCKET", privateBody: "do-not-record" } });
+      return stream([{ type: "response.completed", response: { output: [{ type: "message",
+        content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "private-token" },
+      beforeRequest: gate, fetch });
+    expect((await runner.run(request(events))).output).toBe("Done");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(gate).toHaveBeenCalledTimes(2);
+    expect(events.filter(event => event.type === "siwc.request").map(event => (event.data as { requestAttempt: number }).requestAttempt))
+      .toEqual([1, 2]);
+    expect(events.find(event => event.type === "siwc.transport_error")?.data).toEqual({ turn: 1,
+      requestAttempt: 1, phase: "fetch", retrying: true, errorName: "TypeError", causeCode: "UND_ERR_SOCKET", bytesRead: 0 });
+    expect(JSON.stringify(events)).not.toContain("private-token");
+    expect(JSON.stringify(events)).not.toContain("do-not-record");
+  });
+
+  it("retries a broken stream before tool dispatch without replaying prior or partial tools", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const bodies: unknown[] = [];
+    const execute = vi.fn(async () => ({ read: true }));
+    const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      bodies.push(JSON.parse(init!.body as string));
+      if (bodies.length === 1) return stream([{ type: "response.completed", response: { output: [{ type: "function_call",
+        name: "read_asset", call_id: "prior", arguments: "{}" }] } }]);
+      if (bodies.length === 2) {
+        const bytes = new TextEncoder().encode('data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"read_asset","call_id":"partial","arguments":"{}"}}\n\n');
+        let sent = false;
+        return new Response(new ReadableStream<Uint8Array>({ pull(controller) {
+          if (!sent) { sent = true; controller.enqueue(bytes); }
+          else controller.error(new TypeError("terminated", { cause: { code: "UND_ERR_SOCKET" } }));
+        } }), { headers: { "x-request-id": "req_safe_2" } });
+      }
+      return stream([{ type: "response.completed", response: { output: [{ type: "message",
+        content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch,
+      tools: () => [{ name: "read_asset", description: "read", parameters: { type: "object" }, execute }] });
+    expect((await runner.run(request(events))).output).toBe("Done");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(events.filter(event => event.type === "siwc.tool_call")).toHaveLength(1);
+    expect(events.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({
+      turn: 2, requestAttempt: 1, phase: "stream", retrying: true, status: 200, requestId: "req_safe_2" });
+    expect(bodies[1]).toEqual(bodies[2]);
+  });
+
+  it("retries premature EOF once with the same pending body and without replaying completed tools", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const bodies: unknown[] = [];
+    const gate = vi.fn(async () => {});
+    const execute = vi.fn(async () => ({ read: true }));
+    const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      bodies.push(JSON.parse(init!.body as string));
+      if (bodies.length === 1) return stream([{ type: "response.completed", response: { output: [{ type: "function_call",
+        name: "read_asset", call_id: "prior", arguments: "{}" }] } }]);
+      if (bodies.length === 2) return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.output_item.added"'));
+        controller.close();
+      } }), { headers: { "x-request-id": "req_safe_eof" } });
+      return stream([{ type: "response.completed", response: { output: [{ type: "message",
+        content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "private-token" }, fetch,
+      beforeRequest: gate,
+      tools: () => [{ name: "read_asset", description: "read", parameters: { type: "object" }, execute }] });
+
+    expect((await runner.run(request(events))).output).toBe("Done");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(gate).toHaveBeenCalledTimes(3);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(bodies[1]).toEqual(bodies[2]);
+    expect(events.filter(event => event.type === "siwc.tool_call")).toHaveLength(1);
+    expect(events.find(event => event.type === "siwc.transport_error")?.data).toEqual({
+      turn: 2, requestAttempt: 1, phase: "stream", retrying: true, errorName: "Error",
+      causeCode: "SIWC_STREAM_PREMATURE_EOF", status: 200, requestId: "req_safe_eof",
+      bytesRead: new TextEncoder().encode('data: {"type":"response.output_item.added"').byteLength,
+    });
+    expect(JSON.stringify(events)).not.toContain("private-token");
+  });
+
+  it("bounds premature EOF under the existing transport and server retry budget", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const fetch = vi.fn(async () => fetch.mock.calls.length === 1
+      ? new Response("private body", { status: 507 })
+      : stream([])) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch });
+    await expect(runner.run(request(events))).rejects.toThrow("SIWC_TRANSPORT_FAILURE:stream:SIWC_STREAM_PREMATURE_EOF");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(events.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({
+      causeCode: "SIWC_STREAM_PREMATURE_EOF", retrying: false, bytesRead: 0 });
+    expect(JSON.stringify(events)).not.toContain("private body");
+  });
+
+  it("retries an eligible fetch timeout once without treating it as the workflow deadline", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const fetch = vi.fn(async () => {
+      if (fetch.mock.calls.length === 1) throw new TypeError("fetch failed", { cause: { code: "ETIMEDOUT" } });
+      return stream([{ type: "response.completed", response: { output: [{ type: "message",
+        content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch });
+    expect((await runner.run(request(events))).output).toBe("Done");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(events.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({
+      phase: "fetch", causeCode: "ETIMEDOUT", retrying: true });
+  });
+
+  it("retries an eligible body timeout before completion", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const fetch = vi.fn(async () => {
+      if (fetch.mock.calls.length === 1) return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) { controller.error(new TypeError("terminated", { cause: { code: "UND_ERR_BODY_TIMEOUT" } })); },
+      }));
+      return stream([{ type: "response.completed", response: { output: [{ type: "message",
+        content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch });
+    expect((await runner.run(request(events))).output).toBe("Done");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(events.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({
+      phase: "stream", causeCode: "UND_ERR_BODY_TIMEOUT", retrying: true });
+  });
+
+  it("bounds transport retry, preserves 401 refresh, and never retries abort or explicit provider failure", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const gate = vi.fn(async () => {});
+    const refresh = vi.fn(async () => "fresh-token");
+    const authorization: string[] = [];
+    const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      authorization.push(new Headers(init?.headers).get("authorization") ?? "");
+      if (fetch.mock.calls.length === 1) return new Response("private body", { status: 401 });
+      throw new TypeError("terminated", { cause: { code: "UND_ERR_SOCKET", secret: "do-not-record" } });
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "old-token",
+      refreshAfterUnauthorized: refresh }, beforeRequest: gate, fetch });
+    await expect(runner.run(request(events))).rejects.toThrow("SIWC_TRANSPORT_FAILURE:fetch:UND_ERR_SOCKET");
+    expect(fetch).toHaveBeenCalledTimes(3); // 401 + one failed transport attempt + one retry
+    expect(authorization).toEqual(["Bearer old-token", "Bearer fresh-token", "Bearer fresh-token"]);
+    expect(gate).toHaveBeenCalledTimes(3);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(events.filter(event => event.type === "siwc.transport_error").map(event =>
+      (event.data as { retrying: boolean }).retrying)).toEqual([true, false]);
+    expect(JSON.stringify(events)).not.toContain("old-token");
+    expect(JSON.stringify(events)).not.toContain("fresh-token");
+    expect(JSON.stringify(events)).not.toContain("do-not-record");
+
+    const controller = new AbortController();
+    const abortedFetch = vi.fn(async () => {
+      controller.abort(new Error("canceled"));
+      throw new TypeError("terminated", { cause: { code: "UND_ERR_SOCKET" } });
+    }) as typeof globalThis.fetch;
+    await expect(new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch: abortedFetch })
+      .run(request([], controller.signal))).rejects.toThrow("canceled");
+    expect(abortedFetch).toHaveBeenCalledOnce();
+
+    const providerFetch = vi.fn(async () => stream([{ type: "response.failed", response: { error: { code: "server_error" } } }])) as typeof globalThis.fetch;
+    await expect(new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch: providerFetch })
+      .run(request([]))).rejects.toThrow("SIWC response failed: server_error");
+    expect(providerFetch).toHaveBeenCalledOnce();
+  });
+
+  it("distinguishes a pre-POST auth failure from a sent request without logging its message", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const fetch = vi.fn(async () => new Response());
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => {
+      const error = new Error("private credential detail") as Error & { code: string };
+      error.code = "invalid_grant";
+      throw error;
+    } }, fetch: fetch as typeof globalThis.fetch });
+    await expect(runner.run(request(events))).rejects.toThrow("private credential detail");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(events.find(event => event.type === "siwc.pre_request_error")?.data).toEqual({
+      turn: 1, phase: "auth", errorName: "Error", causeCode: "invalid_grant" });
+    expect(events.some(event => event.type === "siwc.request")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("private credential detail");
+  });
+
+  it("records a failed 401 refresh separately and does not retry the provider POST", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const fetch = vi.fn(async () => new Response("private body", { status: 401,
+      headers: { "x-request-id": "req_safe_refresh" } })) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "private-token",
+      refreshAfterUnauthorized: async () => {
+        const error = new Error("private refresh body") as Error & { code: string };
+        error.code = "invalid_grant";
+        throw error;
+      } }, fetch });
+    await expect(runner.run(request(events))).rejects.toThrow("private refresh body");
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(events.find(event => event.type === "siwc.pre_request_error")?.data).toEqual({
+      turn: 1, phase: "auth_refresh", status: 401, requestId: "req_safe_refresh",
+      errorName: "Error", causeCode: "invalid_grant" });
+    expect(events.some(event => event.type === "siwc.transport_error")).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("private-token");
+    expect(JSON.stringify(events)).not.toContain("private body");
+  });
+
+  it("does not retry after a visible text delta, even if the stream then breaks", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const fetch = vi.fn(async () => {
+      const bytes = new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"partial"}\n\n');
+      let sent = false;
+      return new Response(new ReadableStream<Uint8Array>({ pull(controller) {
+        if (!sent) { sent = true; controller.enqueue(bytes); }
+        else controller.error(new TypeError("terminated", { cause: { code: "UND_ERR_SOCKET" } }));
+      } }));
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch });
+    await expect(runner.run(request(events))).rejects.toThrow("SIWC_TRANSPORT_FAILURE:stream:UND_ERR_SOCKET");
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(events.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({ retrying: false });
+    expect(events.some(event => event.type === "siwc.text_delta")).toBe(true);
+  });
+
+  it("continues after a completed tool response when its stream stays open and cancellation stalls", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const execute = vi.fn(async () => ({ read: true }));
+    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const fetch = vi.fn(async () => {
+      if (fetch.mock.calls.length === 1) {
+        const bytes = new TextEncoder().encode('data: {"type":"response.completed","response":{"output":[{"type":"function_call","name":"read_asset","call_id":"call-1","arguments":"{}"}]}}\n\ndata: {"type":"error","code":"late_error"}\n\n');
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { controller.enqueue(bytes); },
+          cancel,
+        }));
+      }
+      return stream([{ type: "response.completed", response: { output: [{ type: "message",
+        content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
+      fetch, timeoutMs: 200, tools: () => [{ name: "read_asset", description: "read",
+        parameters: { type: "object" }, execute }] });
+
+    expect((await runner.run(request(events))).output).toBe("Done");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(events.filter(event => event.type === "siwc.tool_call")).toHaveLength(1);
+    expect(events.some(event => event.type === "siwc.transport_error")).toBe(false);
+    expect(events.some(event => event.type === "siwc.provider_error")).toBe(false);
+  });
+
+  it("retries one HTTP 507 on the same turn with identical input and a fresh request gate", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const bodies: string[] = [];
+    const gate = vi.fn(async () => {});
+    const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      bodies.push(init!.body as string);
+      return bodies.length === 1
+        ? new Response("private provider body", { status: 507, headers: { "retry-after-ms": "0", "x-request-id": "req_safe_507" } })
+        : stream([{ type: "response.completed", response: { output: [{ type: "message",
+          content: [{ type: "output_text", text: "Done" }] }] } }]);
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "secret-token" }, beforeRequest: gate, fetch });
+    expect((await runner.run(request(events))).output).toBe("Done");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(gate).toHaveBeenCalledTimes(2);
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(events.find(event => event.type === "siwc.provider_retry")?.data).toEqual({
+      turn: 1, requestAttempt: 1, status: 507, requestId: "req_safe_507", delayMs: 0 });
+    expect(events.filter(event => event.type === "siwc.request")).toHaveLength(2);
+    expect(JSON.stringify(events)).not.toContain("private provider body");
+    expect(JSON.stringify(events)).not.toContain("secret-token");
+  });
+
+  it("shares one retry across HTTP 5xx and transport failures while keeping 401 refresh separate", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const refresh = vi.fn(async () => "fresh-token");
+    const fetch = vi.fn(async () => {
+      if (fetch.mock.calls.length === 1) return new Response("", { status: 401 });
+      if (fetch.mock.calls.length === 2) return new Response("", { status: 507,
+        headers: { "retry-after-ms": "0" } });
+      throw new TypeError("terminated", { cause: { code: "UND_ERR_SOCKET" } });
+    }) as typeof globalThis.fetch;
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "old-token",
+      refreshAfterUnauthorized: refresh }, fetch });
+    await expect(runner.run(request(events))).rejects.toThrow("SIWC_TRANSPORT_FAILURE:fetch:UND_ERR_SOCKET");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(events.filter(event => event.type === "siwc.provider_retry")).toHaveLength(1);
+    expect(events.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({ retrying: false });
+
+    const repeated = vi.fn(async () => new Response("", { status: 507,
+      headers: { "retry-after-ms": "0" } })) as typeof globalThis.fetch;
+    await expect(new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch: repeated })
+      .run(request([]))).rejects.toThrow("SIWC Responses request failed (507)");
+    expect(repeated).toHaveBeenCalledTimes(2);
+  });
+
+  it("respects retry refusal and bounded Retry-After, and aborts during an accepted wait", async () => {
+    for (const headers of [{ "x-should-retry": "false" }, { "retry-after": "60" }]) {
+      const fetch = vi.fn(async () => new Response("", { status: 507, headers })) as typeof globalThis.fetch;
+      await expect(new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch })
+        .run(request([]))).rejects.toThrow("SIWC Responses request failed (507)");
+      expect(fetch).toHaveBeenCalledOnce();
+    }
+    const controller = new AbortController();
+    const events: { type: string; data?: unknown }[] = [];
+    const fetch = vi.fn(async () => new Response("", { status: 507,
+      headers: { "retry-after-ms": "1500" } })) as typeof globalThis.fetch;
+    const running = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" }, fetch })
+      .run(request(events, controller.signal));
+    await vi.waitFor(() => expect(events.some(event => event.type === "siwc.provider_retry")).toBe(true));
+    controller.abort(new Error("user canceled"));
+    await expect(running).rejects.toThrow("user canceled");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("finishes only on a sole passing draft receipt and still validates its exact handle", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const draftId = "123e4567-e89b-42d3-a456-426614174000";
+    const sha256 = "a".repeat(64);
+    const execute = vi.fn(async () => execute.mock.calls.length === 1
+      ? { pass: false, draftId, sha256, errors: ["repair needed"] }
+      : { pass: true, draftId, sha256, errors: [] });
+    const validateOutput = vi.fn(async value => {
+      expect(value).toEqual({ acceptedDraft: { draftId, sha256 } });
+      return { resolved: true };
+    });
+    const fetch = vi.fn(async () => stream([{ type: "response.completed", response: { output: [{ type: "function_call",
+      name: "validate_draft", call_id: `call-${fetch.mock.calls.length}`, arguments: "{}" }] } }]));
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
+      fetch: fetch as typeof globalThis.fetch, enforceJsonObject: true,
+      finishOnPassingDraftTools: ["validate_draft"], validateOutput,
+      tools: () => [{ name: "validate_draft", description: "validate", parameters: { type: "object" }, execute }] });
+    const jsonRequest = request(events) as ReturnType<typeof request> & {
+      definition: { config: { instructions: string; outputFormat: "json" } } };
+    jsonRequest.definition.config = { instructions: "Write plainly", outputFormat: "json" };
+    expect((await runner.run(jsonRequest)).output).toEqual({ resolved: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(validateOutput).toHaveBeenCalledOnce();
+    expect(events.filter(event => event.type === "siwc.tool_result")).toHaveLength(2);
+  });
+
+  it("uses the existing technical correction path when host readiness rejects a passing receipt", async () => {
+    const events: { type: string; data?: unknown }[] = [];
+    const handle = { draftId: "123e4567-e89b-42d3-a456-426614174000", sha256: "a".repeat(64) };
+    const validateOutput = vi.fn(async value => {
+      if (validateOutput.mock.calls.length === 1) throw new Error("RESPONSES_PHASE1_UNREAD");
+      expect(value).toEqual({ acceptedDraft: handle });
+      return { ready: true };
+    });
+    const fetch = vi.fn(async () => stream([{ type: "response.completed", response: { output:
+      fetch.mock.calls.length === 1
+        ? [{ type: "function_call", name: "validate_draft", call_id: "call-1", arguments: "{}" }]
+        : [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ acceptedDraft: handle }) }] }] } }]));
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
+      fetch: fetch as typeof globalThis.fetch, finishOnPassingDraftTools: ["validate_draft"],
+      maxOutputValidationCorrections: 1, outputValidationFeedback: async () => "Read missing evidence",
+      validateOutput, tools: () => [{ name: "validate_draft", description: "validate",
+        parameters: { type: "object" }, execute: async () => ({ pass: true, ...handle, errors: [] }) }] });
+    const jsonRequest = request(events) as ReturnType<typeof request> & {
+      definition: { config: { instructions: string; outputFormat: "json" } } };
+    jsonRequest.definition.config = { instructions: "Write plainly", outputFormat: "json" };
+    expect((await runner.run(jsonRequest)).output).toEqual({ ready: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(validateOutput).toHaveBeenCalledTimes(2);
+    expect(events.filter(event => event.type === "siwc.validation_failed")).toHaveLength(1);
+  });
+
+  it("does not finalize a passing receipt in a mixed tool batch", async () => {
+    const validate = vi.fn(async () => ({ pass: true, draftId: "123e4567-e89b-42d3-a456-426614174000",
+      sha256: "a".repeat(64), errors: [] }));
+    const other = vi.fn(async () => ({ read: true }));
+    const fetch = vi.fn(async () => stream([{ type: "response.completed", response: { output:
+      fetch.mock.calls.length === 1
+        ? [{ type: "function_call", name: "validate_draft", call_id: "call-1", arguments: "{}" },
+          { type: "function_call", name: "read_asset", call_id: "call-2", arguments: "{}" }]
+        : [{ type: "message", content: [{ type: "output_text", text: "Done" }] }] } }]));
+    const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
+      fetch: fetch as typeof globalThis.fetch, finishOnPassingDraftTools: ["validate_draft"],
+      tools: () => [{ name: "validate_draft", description: "validate", parameters: { type: "object" }, execute: validate },
+        { name: "read_asset", description: "read", parameters: { type: "object" }, execute: other }] });
+    expect((await runner.run(request([]))).output).toBe("Done");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(validate).toHaveBeenCalledOnce();
+    expect(other).toHaveBeenCalledOnce();
+  });
+
+  it("times out a silent header wait and retries within the same turn", async () => {
+    vi.useFakeTimers();
+    try {
+      const entered = deferred<void>();
+      const events: { type: string; data?: unknown }[] = [];
+      const fetch = vi.fn(async () => {
+        if (fetch.mock.calls.length === 1) { entered.resolve(); return await new Promise<Response>(() => {}); }
+        return stream([{ type: "response.completed", response: { output: [{ type: "message",
+          content: [{ type: "output_text", text: "Done" }] }] } }]);
+      }) as typeof globalThis.fetch;
+      const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
+        fetch, headerTimeoutMs: 180, streamIdleTimeoutMs: 180, timeoutMs: 1_000 });
+      const running = runner.run(request(events));
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(180);
+      expect((await running).output).toBe("Done");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(events.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({
+        phase: "fetch", causeCode: "SIWC_HEADER_TIMEOUT", retrying: true });
+      expect(events.filter(event => event.type === "siwc.response_headers")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("times out an idle stream after bytes and retries without replaying partial tools", async () => {
+    vi.useFakeTimers();
+    try {
+      const firstProgress = deferred<void>();
+      const events: { type: string; data?: unknown }[] = [];
+      const fetch = vi.fn(async () => {
+        if (fetch.mock.calls.length === 1) return new Response(new ReadableStream<Uint8Array>({
+          start(controller) { controller.enqueue(new TextEncoder().encode('data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"read_asset","call_id":"partial","arguments":"{}"}}\n\n')); },
+        }));
+        return stream([{ type: "response.completed", response: { output: [{ type: "message",
+          content: [{ type: "output_text", text: "Done" }] }] } }]);
+      }) as typeof globalThis.fetch;
+      const execute = vi.fn(async () => ({ read: true }));
+      const runRequest = request(events);
+      runRequest.emit = async (type, data) => {
+        events.push({ type, data });
+        if (type === "siwc.stream_progress") firstProgress.resolve();
+      };
+      const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
+        fetch, headerTimeoutMs: 180, streamIdleTimeoutMs: 180, timeoutMs: 1_000,
+        tools: () => [{ name: "read_asset", description: "read", parameters: { type: "object" }, execute }] });
+      const running = runner.run(runRequest);
+      await firstProgress.promise;
+      await vi.advanceTimersByTimeAsync(180);
+      expect((await running).output).toBe("Done");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(execute).not.toHaveBeenCalled();
+      expect(events.find(event => event.type === "siwc.transport_error")?.data).toMatchObject({
+        phase: "stream", causeCode: "SIWC_STREAM_IDLE_TIMEOUT", retrying: true });
+      expect(events.find(event => event.type === "siwc.stream_progress")?.data).toMatchObject({
+        turn: 1, requestAttempt: 1, eventCount: 1, elapsedMs: 0 });
+      expect(JSON.stringify(events.filter(event => event.type === "siwc.stream_progress"))).not.toContain("read_asset");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps an active stream alive beyond the idle limit and records content-free progress", async () => {
+    vi.useFakeTimers();
+    try {
+      let streamController!: ReadableStreamDefaultController<Uint8Array>;
+      const headersSeen = deferred<void>();
+      const events: { type: string; data?: unknown }[] = [];
+      const runRequest = request(events);
+      runRequest.emit = async (type, data) => {
+        events.push({ type, data });
+        if (type === "siwc.response_headers") headersSeen.resolve();
+      };
+      const fetch = vi.fn(async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) { streamController = controller; },
+      }), { headers: { "x-request-id": "req_safe_active" } })) as typeof globalThis.fetch;
+      const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
+        fetch, headerTimeoutMs: 180, streamIdleTimeoutMs: 18_000, timeoutMs: 100_000 });
+      const running = runner.run(runRequest);
+      await headersSeen.promise;
+      const encoder = new TextEncoder();
+      await vi.advanceTimersByTimeAsync(10_000);
+      streamController.enqueue(encoder.encode(": keepalive\n\n"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      streamController.enqueue(encoder.encode(": keepalive\n\n"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      streamController.enqueue(encoder.encode('data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"Done"}]}]}}\n\n'));
+      expect((await running).output).toBe("Done");
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(events.some(event => event.type === "siwc.transport_error")).toBe(false);
+      expect(events.find(event => event.type === "siwc.response_headers")?.data).toMatchObject({
+        status: 200, requestId: "req_safe_active" });
+      expect(events.filter(event => event.type === "siwc.stream_progress")).toHaveLength(2);
+      expect(JSON.stringify(events.filter(event => event.type === "siwc.stream_progress"))).not.toContain("Done");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not retry an externally aborted request during a silent header wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const entered = deferred<void>();
+      const controller = new AbortController();
+      const fetch = vi.fn(async () => { entered.resolve(); return await new Promise<Response>(() => {}); }) as typeof globalThis.fetch;
+      const runner = new OpenAIAgentsSdkRunner({ auth: { accessToken: async () => "token" },
+        fetch, headerTimeoutMs: 180, timeoutMs: 1_000 });
+      const running = runner.run(request([], controller.signal));
+      await entered.promise;
+      controller.abort(new Error("user canceled"));
+      await expect(running).rejects.toThrow("user canceled");
+      expect(fetch).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
   });
 });

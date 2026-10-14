@@ -6,6 +6,8 @@ This is a deliberately bounded integration: it implements the workflow runner su
 
 The SIWC route uses ChatGPT plan authorization only. It never reads Codex credentials, accepts a Platform API key, or silently falls back to API billing. The app-owned login flow stores the renewable connection at `~/.config/creator-lab/workflow-siwc.json` with owner-only permissions. `login`, `status`, `models`, and `logout` are available through the package CLI:
 
+Each Responses POST obtains the current SIWC access token immediately before sending, so a long tool loop can cross a token expiry safely. If a Responses POST returns HTTP 401, the runner attempts one locked SIWC refresh and retries that POST once; concurrent processes reuse a token already rotated by another process. The durable trace records sanitized `siwc.provider_error` status/request IDs and `siwc.auth_refreshed` reason/attempt metadata, never bearer values or response bodies. If refresh or the retry fails, inspect the connection with `workflow-siwc status` and sign in again with `workflow-siwc login` when needed. The runner never switches to API-key or API billing authorization.
+
 ```sh
 node packages/agent-sdk/dist/cli.js login
 node packages/agent-sdk/dist/cli.js status
