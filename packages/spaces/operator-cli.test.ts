@@ -216,12 +216,13 @@ describe('read-only operator CLI', () => {
   });
   it('uses the authenticated safe summary and does not expose CSRF or subject data', async () => {
     const fetch = vi.fn(async () => Response.json({ id: 'space-a', title: 'Content', purpose: 'Create content', methodScope: { workflowId: 'content', entrypoint: 'main', adoptionSlot: 'content' },
-      adoptedVersionId: 'v1', latestVersionId: 'v2', snapshotAt: '2026-10-09', csrfToken: 'private-csrf', subject: { id: 'person' } })) as typeof globalThis.fetch;
+      adoptedVersionId: 'v1', defaultVersionId:'v-main', latestVersionId: 'v2', snapshotAt: '2026-10-09', csrfToken: 'private-csrf', subject: { id: 'person' } })) as typeof globalThis.fetch;
     const call = cli(fetch, ['space']);
     expect(await call.result).toBe(0);
     expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:4397/api/workflow-spaces/v1/spaces/space-a/summary',
       { method: 'GET', headers: { accept: 'application/json', authorization: 'Bearer private-token' }, redirect: 'error' });
     expect(call.stdout.mock.calls[0]![0]).toContain('Create content');
+    expect(JSON.parse(call.stdout.mock.calls[0]![0])).toMatchObject({adoptedVersionId:'v1',defaultVersionId:'v-main',latestVersionId:'v2'});
     expect(call.stdout.mock.calls[0]![0]).not.toMatch(/private-csrf|private-token|person/u);
   });
 

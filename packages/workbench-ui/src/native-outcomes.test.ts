@@ -9,11 +9,11 @@ import { CaseRunOutcome } from './workbench.js';
 
 const api = new SpaceApi('/api/workflow-spaces/v1', 'space-1');
 const scope = 'subject:reader';
-const run = { id: 'child-run', caseId: 'case-1', versionId: 'version-1',
+const run = { id: 'child-run', caseId: 'case-1', versionId: 'version-1', entrypoint: 'post',
   executionMode: 'external-host' } as RunDetailDto;
 const emptyProcess = { coverage: 'observed', occurrences: [] } as unknown as ProcessDto;
 const asset = (id: string, title: string, runId = run.id) =>
-  ({ id, title, runId, sourceKind: 'external-artifact' }) as AssetSummaryDto;
+  ({ id, title, runId, caseId: run.caseId, versionId: run.versionId, state: 'candidate', sourceKind: 'external-artifact' }) as AssetSummaryDto;
 
 function render(client: QueryClient, node: ReturnType<typeof createElement>) {
   return renderToString(createElement(QueryClientProvider, { client }, node)).replaceAll('<!-- -->', '');
@@ -54,12 +54,56 @@ describe('native run outcome reading', () => {
     expect(html.match(/真实子流程成果/g)).toHaveLength(1);
   });
 
-  it('does not count an imported failure memo as a produced outcome of its associated run', () => {
+  it('shows an exact-run import separately without counting it as a produced outcome', () => {
     const client = new QueryClient();
-    published(client, run, [{ ...asset('failure-memo', '外部失败说明'), sourceKind: 'import' }]);
+    published(client, run, [{ ...asset('failure-memo', '外部失败说明'), sourceKind: 'import' },
+      { ...asset('other-case', '其他 Case 的导入材料'), caseId: 'case-other', sourceKind: 'import' },
+      { ...asset('other-version', '其他方法的导入材料'), versionId: 'version-other', sourceKind: 'import' }]);
     const html = outcome(client, run, emptyProcess);
     expect(html).toContain('已发布成果 · 0 项');
-    expect(html).not.toContain('外部失败说明');
+    expect(html).toContain('关联导入材料 / 历史草稿 · 1 项');
+    expect(html).toContain('外部失败说明');
+    expect(html).not.toContain('其他 Case 的导入材料');
+    expect(html).not.toContain('其他方法的导入材料');
+  });
+
+  it('links exact child-run assets from the root without treating them as root-produced', () => {
+    const client = new QueryClient();
+    const root = { ...run, id: 'root-run', versionId: 'root-version' } as RunDetailDto;
+    const child = { ...run, id: 'builder-run', versionId: 'builder-version' } as RunDetailDto;
+    published(client, root, []);
+    client.setQueryData(['space', scope, api.root, 'native-child-index', root.id], { children: [
+      { runId: child.id, workflowId: 'post.build', state: 'completed', binding: 'bound' },
+      { runId: 'pending-run', workflowId: 'post.review', state: 'running', binding: 'pending' },
+    ] });
+    client.setQueryData(['space', scope, api.root, 'native-child-run', child.id], child);
+    published(client, child, [
+      { ...asset('final-candidate', '最终候选稿', child.id), versionId: child.versionId, state: 'revised-unverified' },
+      { ...asset('sibling-asset', '兄弟运行的资产', 'sibling-run'), versionId: child.versionId },
+      { ...asset('foreign-case', '其他案例的资产', child.id), caseId: 'another-case', versionId: child.versionId },
+    ]);
+    const html = outcome(client, root, emptyProcess);
+    expect(html).toContain('已发布成果 · 0 项');
+    expect(html).toContain('此完整任务的子流程成果');
+    expect(html).toContain('最终候选稿');
+    expect(html).toContain('修订未验证 · 只读');
+    expect(html).not.toContain('兄弟运行的资产');
+    expect(html).not.toContain('其他案例的资产');
+    expect(html).not.toContain('pending-run');
+  });
+
+  it('rejects a child whose exact Case binding differs from the root', () => {
+    const client = new QueryClient();
+    const root = { ...run, id: 'root-run' } as RunDetailDto;
+    published(client, root, []);
+    client.setQueryData(['space', scope, api.root, 'native-child-index', root.id], { children: [
+      { runId: 'foreign-child', workflowId: 'post.build', state: 'completed', binding: 'bound' },
+    ] });
+    client.setQueryData(['space', scope, api.root, 'native-child-run', 'foreign-child'], { ...run, id: 'foreign-child', caseId: 'other-case' });
+    published(client, { ...run, id: 'foreign-child' }, [asset('foreign', '不可读的外部成果', 'foreign-child')]);
+    const html = outcome(client, root, emptyProcess);
+    expect(html).toContain('子运行与本 Case 的身份不一致');
+    expect(html).not.toContain('不可读的外部成果');
   });
 
   it('keeps native ledger records separate from ordinary harness sessions', () => {

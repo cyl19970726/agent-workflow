@@ -680,6 +680,7 @@ export async function runOperatorCli(argv: readonly string[], options: OperatorC
       output = { id: string(data.id, 'summary.id'), title: string(data.title, 'summary.title'), purpose: string(data.purpose, 'summary.purpose'),
         methodScope: { workflowId: string(method.workflowId, 'summary.workflowId'), entrypoint: string(method.entrypoint, 'summary.entrypoint'), adoptionSlot: optionalString(method.adoptionSlot, 'summary.adoptionSlot') },
         adoptedVersionId: nullableString(data.adoptedVersionId, 'summary.adoptedVersionId'), latestVersionId: nullableString(data.latestVersionId, 'summary.latestVersionId'), snapshotAt: string(data.snapshotAt, 'summary.snapshotAt') };
+      if(data.defaultVersionId!==undefined)output.defaultVersionId=nullableString(data.defaultVersionId,'summary.defaultVersionId');
       if(data.businessState!==undefined){const state=record(data.businessState,'summary.businessState');
         const fields=['workflowVersions','understandingRevisions','methodDesignRevisions','cases','runs','businessAssets','assetVersions','adoptions'];
         output.businessState={...Object.fromEntries(fields.map(field=>[field,count(state[field],`summary.businessState.${field}`)])),

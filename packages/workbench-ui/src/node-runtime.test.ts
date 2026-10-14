@@ -29,6 +29,25 @@ describe('node configuration and exact runtime reading', () => {
     expect(programHtml).not.toContain('模型与运行上限');
   });
 
+  it('separates saved reasoning configuration from a missing Agent declaration and bounds static tools', () => {
+    const detail = { id: 'builder', versionId: 'main', label: 'Builder', kind: 'agent', definitionRecorded: true,
+      purpose: 'Construct analysis', executor: { family: 'agent-sdk', adapter: 'responses' }, model: 'model-1',
+      tools: ['read_evidence'], inputs: [], outputs: [], instructions: 'During candidate stage use stage_builder_lens.',
+      configuration: { reasoningEffort: 'medium' }, agentDeclarationCoverage: 'full',
+      agentDeclaration: { reasoningEffort: null, timeoutMs: null, maxTurns: null, maxToolCalls: null, outputFormat: null,
+        outputSchema: null, skills: null, tools: [{ name: 'read_evidence', description: null, parameters: null,
+          required: null, outputSchema: null, coverage: 'name-only' }], permissions: null } } as NodeDetailDto;
+    const html = renderToStaticMarkup(createElement(DefinitionNode, { node: detail, tab: 'config', detail: { data: detail, error: null, refetch: vi.fn() } }));
+    expect(html).toContain('<dt>Agent 声明中的推理等级</dt><dd>未记录</dd>');
+    expect(html).toContain('<dt>保存配置中的推理等级</dt><dd>medium</dd>');
+    expect(html).toContain('冻结声明投影完整读取（未截断）');
+    expect(html).toContain('静态名单不是完整执行工具集');
+    expect(html).toContain('其参数 Schema 未保存在此声明中');
+    expect(html).toContain('read_evidence');
+    expect(html).toContain('stage_builder_lens');
+    expect(html).not.toContain('<strong>stage_builder_lens</strong>');
+  });
+
   it('summarizes a recorded tool slot while retaining its raw Schema separately', () => {
     expect(toolFieldSummaries({ type: 'object', properties: { slot: { type: 'string', enum: ['materials', 'research', 'draft'] } }, required: ['slot'] })).toEqual([{ name: 'slot', type: '字符串', required: true, choices: ['materials', 'research', 'draft'], moreChoices: false }]);
     expect(toolFieldSummaries({ type: 'object', properties: null })).toEqual([]);

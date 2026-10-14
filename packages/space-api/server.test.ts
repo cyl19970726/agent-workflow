@@ -74,6 +74,29 @@ describe('Space attachment routes',()=>{
   });
 });
 describe('read-only Space API',()=>{
+  it('keeps latest observation distinct from a validated default primary method',async()=>{
+    const observed={...workflow,id:'observed-later',createdAt:'2026-02-01T00:00:00Z',config:{observedNativeRun:true,methodKind:'auxiliary'}};
+    const scope={workflowId:'content',entrypoint:'content',defaultVersionId:'v1'};
+    const fast=await start({spaceSummary:async()=>({space:data.space,versionCount:2,caseCount:1,runCount:1,assetCount:1,latestVersionId:observed.id,adoptedVersionId:null}),
+      readWorkflowVersion:async(_space,id)=>id==='v1'?workflow:observed,
+      overview:async()=>{throw Error('light summary must not read overview');}}, {scope});
+    expect(await (await fetch(`${fast}/summary`,{headers:{authorization:'alice'}})).json()).toMatchObject({adoptedVersionId:null,defaultVersionId:'v1',latestVersionId:'observed-later'});
+    const full=await start({overview:async()=>({...data,workflows:[workflow,observed]})},{scope});
+    expect(await (await fetch(`${full}/summary`,{headers:{authorization:'alice'}})).json()).toMatchObject({adoptedVersionId:null,defaultVersionId:'v1',latestVersionId:'observed-later'});
+  });
+  it('rejects a host default outside the primary method boundary',async()=>{
+    for(const invalid of [
+      {...workflow,id:'wrong-space',spaceId:'other-space'},
+      {...workflow,id:'wrong-workflow',entrypoints:{content:{...workflow.entrypoints.content!,workflowId:'other'}}},
+      {...workflow,id:'historical',config:{historical:true}},
+      {...workflow,id:'observation',config:{observedNativeRun:true}},
+      {...workflow,id:'auxiliary',config:{methodKind:'auxiliary'}}
+    ]){
+      const url=await start({spaceSummary:async()=>({space:data.space,versionCount:1,caseCount:1,runCount:1,assetCount:1,latestVersionId:invalid.id,adoptedVersionId:null}),
+        readWorkflowVersion:async()=>invalid},{scope:{workflowId:'content',entrypoint:'content',defaultVersionId:invalid.id}});
+      expect((await fetch(`${url}/summary`,{headers:{authorization:'alice'}})).status).toBe(409);
+    }
+  });
   it('reads bounded Case frozen inputs before a run, with exact manifest selection and Case isolation',async()=>{
     const source={...asset,id:'frozen-source',assetId:'source',source:{kind:'import' as const,actorId:'owner',description:'input'},payload:{title:'Private source',text:'SECRET_SOURCE_BODY'}};
     const manifests=['manifest-a','manifest-b'].map(id=>({id,spaceId:'s1',caseId:'c1',assets:{opportunity:'frozen-source'},hash:`hash-${id}`}));
