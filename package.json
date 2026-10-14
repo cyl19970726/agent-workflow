@@ -17,7 +17,7 @@
     "example": "node examples/document-check.mjs",
     "example:postgres": "node examples/postgres-run.mjs",
     "test:postgres": "node scripts/test-postgres.mjs",
-    "examples": "node examples/document-check.mjs && node examples/review-workflow.mjs && node examples/workflow-experiment.mjs && node examples/failure-recovery.mjs && node examples/read-model.mjs && node examples/read-model.mjs --repair",
+    "examples": "node examples/document-check.mjs && node examples/review-workflow.mjs && node examples/workflow-experiment.mjs && node examples/failure-recovery.mjs && node examples/read-model.mjs && node examples/read-model.mjs --repair && node examples/decision-workflow.mjs",
     "check:examples": "tsc -p examples/tsconfig.json",
     "check:docs": "node scripts/check-doc-links.mjs",
     "test:spaces": "node scripts/test-spaces.mjs",

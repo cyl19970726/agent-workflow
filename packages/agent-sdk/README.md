@@ -1,4 +1,8 @@
-# OpenAI Agents SDK runner with SIWC Responses transport
+# OpenAI workflow runners
+
+This package exposes two independent ports: `OpenAIAgentsSdkRunner` uses the official Agents SDK for an agent/tool loop, while `OpenAIDecisionsRunner` uses the official OpenAI API client for typed finite decisions. The latter is not an Agents SDK built-in node. Its client and API authorization must be explicitly supplied by the host; it never borrows SIWC credentials. See [Decision workflow integration](../../docs/decisions.md).
+
+## Agents SDK runner with SIWC Responses transport
 
 `OpenAIAgentsSdkRunner` adapts the workflow `AgentRunner` port to the official `@openai/agents` SDK (pinned here to `0.20.0`). The SDK `Agent` and `Runner.run` own the agent turn loop, tool dispatch, and conversation history. A custom SDK `Model` sends each model request to the OpenAI Responses endpoint using the app-owned **Continue with ChatGPT** authorization. SIWC is the authorization and model-transport path; it is not a replacement agent loop.
 
@@ -32,6 +36,8 @@ The runner maps workflow instructions, model, reasoning effort, text/JSON output
 JSON output is parsed by the adapter. Hosts that require a top-level object can opt into Responses JSON object mode with `enforceJsonObject: true`; each model turn then sends `text.format: { type: "json_object" }` and an explicit JSON requirement in developer input. The default remains compatible with top-level arrays and text output. Hosts may also opt into bounded same-conversation technical corrections with `maxOutputValidationCorrections` (0 by default, maximum 3) and `outputValidationFeedback`. Corrections use the SDK result history and consume the same turn, tool-call, and timeout budgets. They do not relax domain validation or let the host rewrite model output.
 
 For vision, the host can supply `images: (request) => SiwcImage[]` at the initial user turn or return a `SiwcVisualToolResult` from a bound tool. The custom model transport sends actual image bytes as Responses `input_image` data URLs; a path or OCR string alone does not give the model visual access. Events retain MIME types and image hashes, not base64 pixels. `timeoutMs` bounds when `run()` returns and composes with the workflow abort signal. It cannot forcibly stop host callbacks that ignore cancellation; their side effects must be cancellation-safe, and late callback results are ignored by the runner.
+
+`requestTimeoutMs` optionally bounds each physical Responses POST from dispatch through its terminal streamed `response.completed` event; it is unset by default. It differs from the per-POST header timeout and per-chunk stream idle timeout (both default to 180 seconds), so it also stops a stream that keeps sending nonterminal chunks. A request deadline aborts only that POST. It uses the existing shared budget of at most one transport/server retry in the same turn, and retries only before any visible text delta; external cancellation and the whole-run `timeoutMs` remain authoritative. A timed-out POST has unknown token usage unless the provider already reported it: a later successful retry does not provide usage for the timed-out POST. Trace diagnostics record `SIWC_REQUEST_TIMEOUT`, request identity, retry status, and bytes read without recording streamed content or credentials.
 
 The former `SiwcResponsesRunner` compatibility name has been removed. Consumers must use `OpenAIAgentsSdkRunner`. Existing event names beginning `siwc.` and PostgreSQL trace records are retained for persisted-run compatibility; new start/request events add the runtime and SDK identity metadata. `tracingDisabled: true` is deliberate: the existing restricted PostgreSQL workflow trace remains the record, with no implicit cloud SDK trace export.
 

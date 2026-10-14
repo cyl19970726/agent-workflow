@@ -97,4 +97,6 @@ npm run check:docs
 
 当前并发限额是每 Space 的 workflow run 数，首次领取时保存，后续宿主必须使用相同值；在线修改限额的管理命令尚未提供。`interrupted` 保留占用，直到准确执行结果经核对确认；没有通用的一键重试／恢复按钮。该层不宣称外部工具 exactly-once，也不提供进程强杀或多租户资源隔离。任务全生命周期事件写入已有 run ledger，心跳不逐次制造业务 trace。
 
+`GET /runs/:runId/process` 的 `stepMetrics` 按技术步骤列出每次 attempt 的起止时间、时长和可获取的 token 用量；`metrics` 只汇总该 run 自身保存的步骤，**不含 child run**，不能当作整棵执行树的用量。occurrence 也有自己的 `metrics`。`wallDurationMs` 是最早开始至最晚结束的墙钟区间；`inclusiveStepDurationSumMs` 把每个技术步骤的时长相加，包含父子步骤及并行步骤的重叠，不能当作整次运行历时或排他的工作成本。运行中步骤另给 `observedAt` 与 `elapsedSoFarMs`，终态不随查询时间变化。未记录终止事件或供应商未报告的 token 维度以 `null` 表示；`reportedTokens` 是已上报的可核对下限，`usageCoverage` 区分完整、部分、不可获取和无模型推理。统计从现有 PostgreSQL ledger 事件读取，不会回填或改写历史执行。
+
 详情和验收见[准确版本与多选题执行记录](workbench-execution-implementation-2026-10-06.md)。

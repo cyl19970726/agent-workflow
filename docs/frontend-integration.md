@@ -22,6 +22,7 @@ import type { WorkflowSnapshot, WorkflowChanges } from "@signal-room/workflow-re
 
 const reading = createWorkflowReadService({ store, adapters: {
   title: (kind, id, step) => safeTitles.get(id),
+  stepKey: step => safeStepLabels.get(step.id),
   purpose: phase => safePurposes.get(phase.id),
   error: (attemptId, rawError) => safeErrorSummaries.get(attemptId),
   readerUrl: artifact => authorizedReaderUrl(artifact),
@@ -50,7 +51,34 @@ Agent 输出通常由后续 `publish` 控制步骤写入，账本的 `producedBy
 
 `StageView.id` 是稳定的阶段控制步骤 ID，`phaseKey` 是 workflow 定义中的 phase ID。持久恢复可能为同一个逻辑阶段创建多个控制步骤；投影按 `runId + phaseId` 合并，沿用首个控制步骤 ID，用最新控制步骤的状态和绑定，保留历次调用。相同 phase key 在并行子 run 中仍是不同阶段。`CallView.phaseId` 引用 `StageView.id`；子 run 的调用可继承父阶段归属。`call.childRunIds` 展示持久子流程，`attempts` 展示同一逻辑调用的实际执行记录。显式 `read-model.retry` 事件才产生 `retryOf`；旧记录没有此事件时关系未知，不按名字或时间推断。
 
-每个 Agent attempt 的用量按 `agent.usage` 的实际 `childRunId` 去重后累加；没有此类事件时才使用 `agent.completed` 的 `threadId`。同一执行重复上报不重复计费，不同子执行的 token 相加，缺失的输入/缓存/输出维度保持未定义而非零。父 workflow 不再次累计这些 Agent 用量。异常父子循环会出现在 `diagnostics`，不会无限递归或静默拼接。
+### 逐步骤时长与用量
+
+`snapshot.stepMetrics` 包含授权 root 及其子孙 run 的全部技术步骤，包括程序任务和 Decisions。每行以 `stepRunId` 为稳定身份，`runId` 指明所属 run，`attempts` 保留该步骤的各次执行。默认 `key` 是不含原始步骤键的类型加序号；宿主可通过上例的 `stepKey` 提供已审查的显示名称。原有 `CallView.attempts[].usage` 保持兼容：优先按 `agent.usage` 的 `childRunId` 去重，没有此事件时才使用 `agent.completed` 的 `threadId`。
+
+| 字段 | 展示口径 |
+| --- | --- |
+| `wallDurationMs` | 步骤首次开始到最终结束的墙钟区间，包含重试间隙；未结束或缺少时间戳时为 `null`。 |
+| `sumAttemptDurationMs` / `attempts[].durationMs` | 各次尝试耗时的总和／单次耗时；重试分别计算，总和缺少任一次终止时间时为 `null`。 |
+| `elapsedSoFarMs`、`observedAt` | 运行中截至本次读取的已耗时和观测时间；终态均为 `null`，避免无新事件时产生虚假增量。 |
+| `usage`、`reportedTokens`、`usageCoverage` | `complete` 时 `usage` 是已观测模型调用的完整输入／输出计数；`partial` 时 `usage` 为 `null`，`reportedTokens` 仅是已上报的下限；`unavailable` 表示模型用量未报告；`not_applicable` 表示该步骤不涉及模型调用。未知值不是 0。 |
+
+`inputTokens`、`outputTokens` 是输入和输出；`cachedInputTokens` 属于输入，`reasoningOutputTokens` 属于输出，**不能再加到输入／输出或 `totalTokens` 上**。供应商未报告的子维度保持 `null`，不要补成 0，也不要由其他字段推算缺失的 `totalTokens`。SIWC 完成响应、Decisions 响应与完成回声、通用 Agent 用量会按可用的响应或请求身份去重；缺少稳定身份、请求失败或取消后没有用量回执时只保留可核验的下限。用量不是账单确认。
+
+`workflow-read-model` 的快照范围是授权 root 的整棵实际执行树；父 workflow 不重复累计子步骤 Token。Space Process 的 `stepMetrics` 和 `metrics` **只覆盖当前选定 Run 自身的步骤**，不含 child run，不能把其汇总称为全树用量。Process 汇总中的 `wallDurationMs` 是这些步骤的墙钟区间；`inclusiveStepDurationSumMs` 是各步骤时长的简单相加，父子步骤及并行步骤可能重叠，不能当作整次运行历时或排他工作成本。读模型的单步 DTO 没有这个汇总字段。
+
+例如按已授权的 `selectedRunId` 展示快照中的步骤：
+
+```ts
+for (const step of snapshot.stepMetrics.filter(item => item.runId === selectedRunId)) {
+  const durationMs = step.wallDurationMs ?? step.elapsedSoFarMs;
+  const tokens = step.usage ?? step.reportedTokens;
+  const label = step.usageCoverage === "partial" ? "已上报下限" : step.usageCoverage;
+  console.log(step.key, step.state, durationMs ?? "耗时未记录", label,
+    tokens?.inputTokens ?? "输入未记录", tokens?.outputTokens ?? "输出未记录", tokens?.cachedInputTokens ?? "缓存未记录");
+}
+```
+
+底层只按已持久化的 `step.started`、`step.completed`／`step.failed` 和用量事件投影，不回填历史执行。异常父子循环会出现在 `diagnostics`，不会无限递归或静默拼接。
 
 不要把四种状态压成一个“完成”：`state` 是执行状态，`validation` 是结构校验，`review` 是独立复核事实，`delivery` 是交付选择。执行 `succeeded` 不保证候选可交付。`expectedArtifacts.required` 只标记绑定缺失，不改变 run 的执行结果。`waitingForRunId` 表示父阶段等待子运行；`blocked`、`needs_review`、`failed` 和 `canceled` 应分别显示。被取消的 run 上仍为 `waiting` 的阶段投影为 `canceled`。历史资料不足时显示 `unknown`，不要猜“通过”。
 
@@ -74,7 +102,7 @@ Agent 输出通常由后续 `publish` 控制步骤写入，账本的 `producedBy
 
 ## 快照、增量与分页
 
-首屏取 `getSnapshot`，保留 `cursor`。轮询或 SSE 推送时，宿主用同一 root 调 `getChanges`。`resetRequired: true` 表示 cursor 不存在、已被有界缓存淘汰或属于别的 root；重新取快照。成功响应的 `changed.runs/stages/calls/artifacts` 是按稳定 ID upsert 的局部数组，`removed` 中的 ID 要删除；`changed.progress`、`changed.delivery`、`changed.diagnostics` 和 `changed.relations` 是完整当前值，直接替换。请求重试可重复应用同一 upsert 而不会重复计数。
+首屏取 `getSnapshot`，保留 `cursor`。轮询或 SSE 推送时，宿主用同一 root 调 `getChanges`。`resetRequired: true` 表示 cursor 不存在、已被有界缓存淘汰或属于别的 root；重新取快照。成功响应的 `changed.runs/stages/calls/stepMetrics/artifacts` 是按稳定 ID upsert 的局部数组，`stepMetrics` 使用 `stepRunId`，其他数组使用各自 ID；`removed` 中的 ID 要删除。`changed.progress`、`changed.delivery`、`changed.diagnostics` 和 `changed.relations` 是完整当前值，直接替换。请求重试可重复应用同一 upsert 而不会重复计数。
 
 cursor 是服务进程内的随机 opaque token，默认最多保存 64 个，不跨进程/重启共享。负载均衡需要会话粘滞，或在换实例时用 `resetRequired` 重新取快照。每个 run 的事件序号独立；增量按各自水位读取新事件，同时重新查询该 root 的子运行、步骤、资产和状态，所以终态后新发布的资产也可发现。首个快照会读整个所选树的历史，常规增量不会反复读取完整事件历史；这不是跨多个存储调用的事务快照，竞态在下一次轮询中收敛。超过配置的 `maxRuns` 会明确报错，不静默截断。
 

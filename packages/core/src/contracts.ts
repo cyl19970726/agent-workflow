@@ -106,6 +106,8 @@ export interface PhaseContext extends WorkflowContext {
 }
 
 export interface WorkflowContext {
+  decision(key: string, definition: import("./decisions.js").DecisionDefinition,
+    input: import("./decisions.js").DecisionInput): Promise<import("./decisions.js").DecisionResult>;
   task<Input, Output>(key: string, implementation: TaskImplementation<Input, Output>, input: Input): Promise<Output>;
   agent<Input, Output>(key: string, definition: AgentDefinition<Input, Output>, input: Input): Promise<Output>;
   call<Input, Output>(key: string, definition: WorkflowDefinition<Input, Output>, input: Input): Promise<Output>;

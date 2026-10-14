@@ -1,5 +1,5 @@
 import {describe,expect,it} from 'vitest';
-import type {StepRecord} from '@signal-room/workflow';
+import type {StepRecord,WorkflowEvent} from '@signal-room/workflow';
 import type {ProcessContract} from './process-contract.js';
 import {projectProcess,type HistoricalProcessResolution} from './process-projection.js';
 import type {NodeContext,ProcessDecisionObservation,SpaceRun} from './types.js';
@@ -20,6 +20,28 @@ const project=(steps:StepRecord[],outputIds:string[]=[],processContract=contract
   assets:[],relations:[]});
 
 describe('process projection',()=>{
+  it('retains step and attempt timing with token usage in the process read model',()=>{
+    const steps=[step('write','succeeded'),step('route','succeeded','decision')];
+    const attempts=[{id:'agent-attempt',runId:'run',stepRunId:'write',state:'succeeded' as const},
+      {id:'decision-attempt',runId:'run',stepRunId:'route',state:'succeeded' as const}];
+    let seq=0;
+    const event=(stepRunId:string,attemptId:string,type:string,ms:number,data?:unknown):WorkflowEvent=>({
+      id:`e${++seq}`,seq,runId:'run',stepRunId,attemptId,type,timestamp:new Date(1_700_000_000_000+ms).toISOString(),data});
+    const events=[event('write','agent-attempt','step.started',0),event('route','decision-attempt','step.started',100),
+      event('write','agent-attempt','siwc.response',500,{responseId:'r1',usage:{input_tokens:20,output_tokens:5,total_tokens:25}}),
+      event('route','decision-attempt','decision.inference.response',600,{usage:{inputTokens:4,outputTokens:1,totalTokens:5}}),
+      event('route','decision-attempt','decision.inference.completed',610,{usage:{inputTokens:4,outputTokens:1,totalTokens:5}}),
+      event('write','agent-attempt','step.completed',1000),event('route','decision-attempt','step.completed',1100)];
+    const view=projectProcess({run,contract,contractSource:'method',steps,attempts,events,
+      contexts:steps.map(item=>context(item.id)),outputs:[],assets:[],relations:[]});
+    expect(view.stepMetrics).toHaveLength(2);
+    expect(view.stepMetrics[0]).toMatchObject({wallDurationMs:1000,usage:{inputTokens:20,outputTokens:5},
+      attempts:[{durationMs:1000}]});
+    expect(view.stepMetrics[1]?.usage?.inputTokens).toBe(4);
+    expect(view.metrics).toMatchObject({wallDurationMs:1100,inclusiveStepDurationSumMs:2000,
+      usage:{inputTokens:24,outputTokens:6,totalTokens:30}});
+    expect(view.occurrences[0]?.metrics.wallDurationMs).toBe(1100);
+  });
   it('keeps recovered output successful and failed attempts visible regardless of step order',()=>{
     const steps=[step('write-failed','failed'),step('write-recovered','succeeded'),
       step('publish-recovered','succeeded','publish'),step('publish-failed','failed','publish')];

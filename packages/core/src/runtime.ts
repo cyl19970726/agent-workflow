@@ -3,6 +3,8 @@ import type {
   ParallelResults, ParallelSettledResults, PhaseArtifactBinding, PhaseContext, PhaseDefinition, StepKind, TaskImplementation,
   ValidationResult, ValidationState, WorkflowContext, WorkflowDefinition, WorkflowTerminal,
 } from "./contracts.js";
+import { createHash } from "node:crypto";
+import { DecisionProtocolError, defineDecision, type DecisionDefinition, type DecisionInput, type DecisionResult, type DecisionRunner } from "./decisions.js";
 import type { AgentRunner, ArtifactDraft, ChildWorkflowDispatcher, EventDraft, RunRecord, RunStore, StepRecord, StepResultReceipt } from "./ports.js";
 
 export class WorkflowCanceledError extends Error {
@@ -27,6 +29,7 @@ export interface RunWorkflowOptions<Input, Output> {
   metadata?: Readonly<Record<string, unknown>>;
   parent?: { runId: string; stepRunId: string };
   childDispatcher?: ChildWorkflowDispatcher;
+  decisionRunner?: DecisionRunner;
 }
 
 export interface RunWorkflowResult<Output> {
@@ -34,7 +37,8 @@ export interface RunWorkflowResult<Output> {
   output?: Output;
 }
 
-type RuntimeSharedState = { pending: Promise<void>[]; producerSteps: WeakMap<object, string[]>; executedKeys: Set<string> };
+type RuntimeSharedState = { pending: Promise<void>[]; producerSteps: WeakMap<object, string[]>; executedKeys: Set<string>;
+  asyncDecisionKeys: Set<string>; syncDecisionKeys: Set<string> };
 const pendingArtifactBrand: unique symbol = Symbol("pendingArtifact");
 type PendingArtifact = { readonly [pendingArtifactBrand]: true; readonly draft: ArtifactDraft };
 function pendingArtifact(draft: ArtifactDraft): PendingArtifact { return { [pendingArtifactBrand]: true, draft }; }
@@ -80,7 +84,7 @@ export async function runWorkflow<Input, Output>(options: RunWorkflowOptions<Inp
   const signal = options.signal ?? new AbortController().signal;
   await options.store.updateRun(run.id, { state: "running", error: undefined });
   await options.store.appendEvent({ runId: run.id, parentRunId: run.parentRunId, type: "workflow.started" });
-  const context = new RuntimeContext(options.store, options.agentRunner, run, signal, options.childDispatcher,
+  const context = new RuntimeContext(options.store, options.agentRunner, run, signal, options.childDispatcher, options.decisionRunner,
     undefined, inheritedPhaseScope(run.metadata));
   try {
     context.assertActive();
@@ -110,9 +114,10 @@ export async function runWorkflow<Input, Output>(options: RunWorkflowOptions<Inp
 class RuntimeContext implements WorkflowContext {
   private readonly shared: RuntimeSharedState;
   constructor(private readonly store: RunStore, private readonly runner: AgentRunner, private readonly run: RunRecord, private readonly signal: AbortSignal,
-    private readonly childDispatcher?: ChildWorkflowDispatcher, shared?: RuntimeSharedState,
+    private readonly childDispatcher?: ChildWorkflowDispatcher, private readonly decisionRunner?: DecisionRunner, shared?: RuntimeSharedState,
     private readonly phaseScope?: PhaseScope) {
-    this.shared = shared ?? { pending: [], producerSteps: new WeakMap<object, string[]>(), executedKeys: new Set<string>() };
+    this.shared = shared ?? { pending: [], producerSteps: new WeakMap<object, string[]>(), executedKeys: new Set<string>(),
+      asyncDecisionKeys: new Set<string>(), syncDecisionKeys: new Set<string>() };
   }
 
   async task<Input, Output>(key: string, implementation: TaskImplementation<Input, Output>, input: Input): Promise<Output> {
@@ -131,6 +136,7 @@ class RuntimeContext implements WorkflowContext {
     if (this.childDispatcher) return this.dispatchChild(key, definition, input);
     return this.step(key, "workflow", input, `${definition.id}:${definition.revision}`, "valid", async (execution) => {
       const child = await runWorkflow({ workflow: definition, input, store: this.store, agentRunner: this.runner,
+        decisionRunner: this.decisionRunner,
         signal: this.signal, metadata: this.executionMetadata(), parent: { runId: this.run.id, stepRunId: execution.stepRunId } });
       return child.output as Output;
     });
@@ -271,7 +277,7 @@ class RuntimeContext implements WorkflowContext {
     return this.step(key, "phase", definition, `phase:v1:${workflowFingerprint(definition)}`, "valid",
       async (execution) => {
         const scope: PhaseScope = { phaseId, phasePath, controlStepId: execution.stepRunId, ownerRunId: this.run.id, bindings: [] };
-        const context = new RuntimeContext(this.store, this.runner, this.run, this.signal, this.childDispatcher, this.shared, scope);
+        const context = new RuntimeContext(this.store, this.runner, this.run, this.signal, this.childDispatcher, this.decisionRunner, this.shared, scope);
         return execute(context as PhaseContext);
       }, false, { phaseId, phasePath, phaseDefinition: canonicalWorkflowValue(definition) });
   }
@@ -300,7 +306,60 @@ class RuntimeContext implements WorkflowContext {
     await this.store.appendEvent({ runId: this.run.id, stepRunId: scope.controlStepId, type: "phase.artifact_bound",
       data: { phaseId: scope.phaseId, phasePath: scope.phasePath, binding: value } });
   }
+  async decision(key: string, definition: DecisionDefinition, input: DecisionInput): Promise<DecisionResult> {
+    this.assertActive();
+    assertKey(key);
+    const stepKey = this.scopedKey(key);
+    if (this.shared.syncDecisionKeys.has(stepKey) || this.shared.asyncDecisionKeys.has(stepKey)) {
+      throw new Error(`Decision key "${stepKey}" was already used in this execution`);
+    }
+    const normalized = defineDecision(definition);
+    const snapshot = snapshotDecisionInput(input);
+    const runner = this.decisionRunner;
+    if (!runner) throw new Error("Decision runner is not configured");
+    if (runner.provider !== normalized.provider || !runner.revision?.trim()) {
+      throw new Error(`Decision runner provider/revision mismatch: expected ${normalized.provider}`);
+    }
+    const inputFingerprint = workflowFingerprint(snapshot);
+    const configFingerprint = workflowFingerprint({ definition: normalized, runner: { provider: runner.provider, revision: runner.revision } });
+    this.shared.asyncDecisionKeys.add(stepKey);
+    try {
+      return await this.step(key, "decision", snapshot, configFingerprint, "valid", async (execution, emit) => {
+        const idempotencyKey = `${execution.idempotencyKey}:${inputFingerprint}:${configFingerprint}`;
+        const eventInput = { text: snapshot.text, images: snapshot.images?.map(({ sha256, label, detail }) => ({ sha256, label, detail })),
+          evidenceRefs: snapshot.evidenceRefs };
+        await emit("decision.inference.started", { definition: normalized, input: eventInput,
+          runner: { provider: runner.provider, revision: runner.revision }, inputFingerprint, configFingerprint });
+        let lastError: unknown;
+        for (let attempt = 0; attempt <= (normalized.maxRetries ?? 0); attempt++) {
+          try {
+            const result = await runDecisionWithTimeout(runner, { ...execution, idempotencyKey,
+              definition: normalized, input: snapshot, signal: this.signal, emit, runMetadata: this.executionMetadata() }, normalized.timeoutMs);
+            validateDecisionResult(normalized, result);
+            const validated = copyDecisionResult(result);
+            await emit("decision.inference.completed", validated);
+            return validated;
+          } catch (error) {
+            if (this.signal.aborted || error instanceof WorkflowCanceledError) throw error;
+            lastError = error;
+            if (error instanceof DecisionProtocolError || error instanceof DecisionRunnerFailure && !error.retryable
+              || attempt === (normalized.maxRetries ?? 0)) break;
+            await emit("decision.inference.retrying", { attempt: attempt + 1, error: safeError(error) });
+          }
+        }
+        await emit("decision.inference.failed", { error: safeError(lastError) });
+        throw lastError;
+      });
+    } catch (error) {
+      this.shared.asyncDecisionKeys.delete(stepKey);
+      throw error;
+    }
+  }
   decide<Value>(key: string, decision: Value): Value {
+    assertKey(key);
+    const stepKey = this.scopedKey(key);
+    if (this.shared.asyncDecisionKeys.has(stepKey)) throw new Error(`Decision key "${stepKey}" was already used for async inference`);
+    this.shared.syncDecisionKeys.add(stepKey);
     this.shared.pending.push(this.recordDecision(key, decision));
     return decision;
   }
@@ -527,6 +586,162 @@ function inheritedPhaseScope(metadata: Readonly<Record<string, unknown>> | undef
     controlStepId: metadata.phaseControlStepId, ownerRunId: metadata.phaseOwnerRunId, bindings: [] };
 }
 function safeError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+class DecisionRunnerFailure extends Error {
+  constructor(readonly retryable: boolean, status?: number, errorType?: string) {
+    super(`Decision runner failed${errorType ? ` (${errorType})` : ""}${status ? `, HTTP ${status}` : ""}`);
+    this.name = "DecisionRunnerFailure";
+  }
+}
+function sanitizeDecisionRunnerError(error: unknown): DecisionRunnerFailure {
+  const value = error && typeof error === "object" ? error as { status?: unknown; errorType?: unknown } : {};
+  const status = Number.isSafeInteger(value.status) && Number(value.status) >= 100 && Number(value.status) <= 599
+    ? Number(value.status) : undefined;
+  const allowed = ["APIError", "BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError",
+    "ConflictError", "UnprocessableEntityError", "RateLimitError", "InternalServerError", "APIConnectionError",
+    "APIConnectionTimeoutError", "APIUserAbortError", "AbortError", "TypeError", "UnknownError"];
+  const errorType = typeof value.errorType === "string" && allowed.includes(value.errorType) ? value.errorType : undefined;
+  const nonRetryable = status !== undefined && status >= 400 && status < 500 && ![408, 409, 429].includes(status)
+    || ["BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError", "UnprocessableEntityError"].includes(errorType ?? "");
+  return new DecisionRunnerFailure(!nonRetryable, status, errorType);
+}
+function snapshotDecisionInput(input: DecisionInput): DecisionInput {
+  if (!input || typeof input.text !== "string" || (input.images !== undefined && !Array.isArray(input.images))
+    || (input.evidenceRefs !== undefined && !Array.isArray(input.evidenceRefs))) {
+    throw new Error("Decision input requires text and optional image/ref arrays");
+  }
+  const images = input.images?.map((image) => Object.freeze({ dataUrl: image.dataUrl, sha256: image.sha256,
+    label: image.label, detail: image.detail }));
+  const evidenceRefs = input.evidenceRefs?.map((ref) => Object.freeze({ artifactId: ref.artifactId,
+    revision: ref.revision, sha256: ref.sha256 }));
+  const snapshot = Object.freeze({ text: input.text, images: images && Object.freeze(images),
+    evidenceRefs: evidenceRefs && Object.freeze(evidenceRefs) });
+  validateDecisionInput(snapshot);
+  return snapshot;
+}
+function validateDecisionInput(input: DecisionInput): void {
+  if (!input || typeof input.text !== "string") throw new Error("Decision input text is required");
+  for (const image of input.images ?? []) {
+    const match = /^data:image\/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/u.exec(image.dataUrl);
+    if (!match || !/^[a-f0-9]{64}$/u.test(image.sha256)) throw new Error("Decision images require inline data URLs and SHA-256");
+    const bytes = Buffer.from(match[1]!, "base64");
+    if (!bytes.length || bytes.toString("base64") !== match[1] || createHash("sha256").update(bytes).digest("hex") !== image.sha256) {
+      throw new Error("Decision image SHA-256 does not match inline bytes");
+    }
+  }
+  for (const ref of input.evidenceRefs ?? []) {
+    if (!ref.artifactId?.trim() || !ref.revision?.trim() || !/^[a-f0-9]{64}$/u.test(ref.sha256)) {
+      throw new Error("Decision evidence refs require artifactId, revision and SHA-256");
+    }
+  }
+}
+function validProbability(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1; }
+function sameChoice(a: string | boolean, b: string | boolean): boolean { return typeof a === typeof b && a === b; }
+function validateDecisionResult(definition: DecisionDefinition, result: DecisionResult): void {
+  if (!result || result.provider !== definition.provider || result.model !== definition.model || !Array.isArray(result.answers)
+    || result.answers.length !== definition.questions.length) throw new DecisionProtocolError("provider, model or answer count mismatch");
+  const questions = new Map(definition.questions.map((question) => [question.name, question]));
+  const seen = new Set<string>();
+  for (const answer of result.answers) {
+    const question = questions.get(answer?.name);
+    if (!question || seen.has(answer.name)) throw new DecisionProtocolError("missing, duplicate or unknown question name");
+    seen.add(answer.name);
+    if (answer.type === "refusal") continue;
+    if (answer.type !== question.type) throw new DecisionProtocolError(`answer type mismatch for ${answer.name}`);
+    if (answer.type === "predicate") {
+      if (!validProbability(answer.probability)) throw new DecisionProtocolError(`invalid predicate probability for ${answer.name}`);
+    } else if (answer.type === "choice" && question.type === "choice") {
+      if (!validProbability(answer.confidence) || !question.choices.some((choice) => sameChoice(choice.value, answer.choice))
+        || !Array.isArray(answer.probabilities) || answer.probabilities.length !== question.choices.length) {
+        throw new DecisionProtocolError(`invalid choice answer for ${answer.name}`);
+      }
+      const values = new Set<string>();
+      for (const probability of answer.probabilities) {
+        if (!probability || typeof probability !== "object") throw new DecisionProtocolError(`invalid choice probability for ${answer.name}`);
+        const key = `${typeof probability.value}:${probability.value}`;
+        if (values.has(key) || !question.choices.some((choice) => sameChoice(choice.value, probability.value))
+          || !validProbability(probability.probability)) throw new DecisionProtocolError(`invalid choice probability for ${answer.name}`);
+        values.add(key);
+      }
+      if (Math.abs(answer.probabilities.reduce((sum: number, item: { probability: number }) => sum + item.probability, 0) - 1) > 0.01) {
+        throw new DecisionProtocolError(`choice probabilities do not sum to one for ${answer.name}`);
+      }
+    } else if (answer.type === "score" && question.type === "score") {
+      if (!validProbability(answer.confidence) || !Number.isFinite(answer.score)
+        || !Array.isArray(answer.probabilities) || answer.probabilities.length !== question.levels.length) {
+        throw new DecisionProtocolError(`invalid score answer for ${answer.name}`);
+      }
+      const labels = new Set<string>();
+      for (const probability of answer.probabilities) {
+        if (!probability || typeof probability !== "object") throw new DecisionProtocolError(`invalid score probability for ${answer.name}`);
+        if (labels.has(probability.label) || !question.levels.some((level) => level.label === probability.label)
+          || !Number.isFinite(probability.value) || !validProbability(probability.probability)) {
+          throw new DecisionProtocolError(`invalid score probability for ${answer.name}`);
+        }
+        labels.add(probability.label);
+      }
+      const values = answer.probabilities.map((item: { value: number }) => item.value);
+      if (answer.score < Math.min(...values) - 1e-9 || answer.score > Math.max(...values) + 1e-9) {
+        throw new DecisionProtocolError(`score is outside its level values for ${answer.name}`);
+      }
+      if (Math.abs(answer.probabilities.reduce((sum: number, item: { probability: number }) => sum + item.probability, 0) - 1) > 0.01) {
+        throw new DecisionProtocolError(`score probabilities do not sum to one for ${answer.name}`);
+      }
+    }
+  }
+  if (result.usage && (![result.usage.inputTokens, result.usage.outputTokens, result.usage.totalTokens].every((value) => Number.isSafeInteger(value) && value >= 0)
+    || result.usage.totalTokens < result.usage.inputTokens + result.usage.outputTokens)) {
+    throw new DecisionProtocolError("invalid usage");
+  }
+}
+function copyDecisionResult(result: DecisionResult): DecisionResult {
+  return { provider: result.provider, model: result.model,
+    answers: result.answers.map((answer) => {
+      if (answer.type === "refusal") return { type: "refusal", name: answer.name };
+      if (answer.type === "predicate") return { type: "predicate", name: answer.name, probability: answer.probability };
+      if (answer.type === "choice") return { type: "choice", name: answer.name, choice: answer.choice,
+        confidence: answer.confidence, probabilities: answer.probabilities.map(({ value, probability }) => ({ value, probability })) };
+      return { type: "score", name: answer.name, score: answer.score, confidence: answer.confidence,
+        probabilities: answer.probabilities.map(({ label, value, probability }) => ({ label, value, probability })) };
+    }), usage: result.usage ? { inputTokens: result.usage.inputTokens, outputTokens: result.usage.outputTokens,
+      totalTokens: result.usage.totalTokens } : undefined, requestId: result.requestId };
+}
+async function runDecisionWithTimeout(runner: DecisionRunner, request: import("./decisions.js").DecisionRunRequest,
+  timeoutMs: number): Promise<DecisionResult> {
+  if (request.signal.aborted) throw new WorkflowCanceledError();
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout>;
+  let rejectAbort!: (reason: unknown) => void;
+  let active = true;
+  const pendingEmits = new Set<Promise<void>>();
+  const emit = (type: string, data?: unknown): Promise<void> => {
+    if (!active) return Promise.resolve();
+    const write = request.emit(type, data);
+    pendingEmits.add(write);
+    void write.finally(() => pendingEmits.delete(write)).catch(() => {});
+    return write;
+  };
+  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+  const onParentAbort = () => { active = false; controller.abort(request.signal.reason); rejectAbort(new WorkflowCanceledError()); };
+  request.signal.addEventListener("abort", onParentAbort, { once: true });
+  if (request.signal.aborted) onParentAbort();
+  timeout = setTimeout(() => { active = false; controller.abort(new Error("Decision inference timed out"));
+    rejectAbort(new Error("Decision inference timed out")); }, timeoutMs);
+  try {
+    const invocation = Promise.resolve().then(() => {
+      if (request.signal.aborted || controller.signal.aborted) throw new WorkflowCanceledError();
+      return runner.run({ ...request, signal: controller.signal, emit });
+    }).catch((error: unknown) => {
+      if (error instanceof WorkflowCanceledError && request.signal.aborted) throw error;
+      throw error instanceof DecisionProtocolError ? new DecisionProtocolError() : sanitizeDecisionRunnerError(error);
+    });
+    return await Promise.race([invocation, aborted]);
+  } finally {
+    active = false;
+    clearTimeout(timeout);
+    request.signal.removeEventListener("abort", onParentAbort);
+    await Promise.allSettled(pendingEmits);
+  }
+}
 export function workflowFingerprint(value: unknown): string {
   const text = stableStringify(canonicalWorkflowValue(value));
   let hash = 0xcbf29ce484222325n;

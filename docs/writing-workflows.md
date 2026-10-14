@@ -22,6 +22,7 @@ runWorkflow<Input, Output>({
   input,
   store,
   agentRunner,
+  decisionRunner?,
   signal?,
   resumeRunId?,
   metadata?,
@@ -39,6 +40,7 @@ runWorkflow<Input, Output>({
 ```ts
 ctx.task(key, implementation, input): Promise<Output>
 ctx.agent(key, definition, input): Promise<Output>
+ctx.decision(key, definition, input): Promise<DecisionResult>
 ctx.call(key, workflow, input): Promise<Output>
 
 ctx.mapSettled(key, inputs, {
@@ -63,6 +65,7 @@ ctx.needsReview(details): WorkflowTerminal<never>
 
 - `task`：确定性计算或由宿主管控的副作用。实现会收到 `signal`、`idempotencyKey`、run/step/attempt ID；外部写操作应使用该幂等键。
 - `agent`：通过注入的 `AgentRunner` 执行模型。Agent 结果初始校验状态默认为 `pending`。
+- `decision`：通过注入的 `DecisionRunner` 执行有类型的有限判断，保存原生答案与调用证据；不自动执行路由。配置、输入、重放和拒答边界见 [Decision 接口](./decisions.md)。
 - `call`：调用子 workflow。未配置 dispatcher 时内联运行；配置后会派发持久子运行并让父运行进入 `waiting`。
 - `decide`：记录影响路径的决定。普通局部计算无需包装成步骤。
 - `blocked`：缺材料或前置条件，当前无法完成；`needsReview`：已有可读结果，但仍需人工或后续处理。两者都与技术失败不同。

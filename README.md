@@ -44,6 +44,7 @@ npm run verify
 | [前端工作台](examples/read-model-web.mjs) | 本机浏览器查看安全快照、失败 attempt、显式重试和增量更新；运行后打开终端显示的地址 |
 | [PostgreSQL 存储](examples/postgres-run.mjs) | 确定性 task 写入 PG；新建连接读回并校验正文，再对同一 run replay；不调用模型。需设置 `WORKFLOW_DATABASE_URL` |
 | [Agents SDK 接入](examples/agents-sdk-workflow.ts) | 官方 `Agent`／`Runner.run`、skill hash 绑定、PostgreSQL store 由宿主传入；默认只类型检查，调用导出函数才会运行模型 |
+| [决策步骤](examples/decision-workflow.mjs) | `ctx.decision` 模型判断与 `ctx.decide` 业务采用分开记录，恢复复用；此示例不调用真实模型 |
 
 ## 文档
 
@@ -63,6 +64,7 @@ npm run verify
 | 从 session 历史或新意图设计阶段、步骤和资产 | [设计 Workflow](docs/designing-workflows.md) |
 | 编写小流程、并行、阶段、验证和资产 | [编写工作流与 API](docs/writing-workflows.md) |
 | 使用官方 Agents SDK，或只读查看历史 Codex trace 与冻结 skill | [Agent SDK 与历史 trace](docs/codex-and-skills.md) |
+| 在 workflow 中调用有类型的决策模型 | [Decision 接口、版本与授权边界](docs/decisions.md) |
 | 评估 workflow 自身的质量、稳定性和效率 | [Workflow 评估指南](docs/evaluating-workflows.md) |
 | 根据失败归因和对照实验改进流程 | [优化 Workflow](docs/optimizing-workflows.md) |
 | 一轮调优的实际步骤：冻结输入、读 trace、归因、重跑、定工作台显示 | [调优循环](docs/tuning-loop.md) |
@@ -79,7 +81,7 @@ npm run verify
 | `@signal-room/workflow-postgres` | PostgreSQL run/step/attempt/event/artifact 存储、JSON 正文读取与可选原子步骤提交；不含完整 harness、调度或 SDK runner |
 | `@signal-room/workflow-space-contracts` | JSON Schema 注册与依赖冻结、节点存储合同、字段视图与动作校验 |
 | `@signal-room/workflow-spaces` | PG 空间领域、版本与会话、受限 client/tools、core 桥接、评价比较和只读控制台 |
-| `@signal-room/workflow-agent-sdk` | 官方 Agents SDK `AgentRunner` 适配、应用自持 SIWC OAuth 与受限单请求传输；见包内 README 的已实现范围 |
+| `@signal-room/workflow-agent-sdk` | 官方 Agents SDK `AgentRunner`、SIWC Responses 传输；另提供独立授权的官方 OpenAI `DecisionRunner` |
 | `@signal-room/workflow-skill-snapshot` | Provider-independent skill bundle capture、validation 与 materialization；不调用 Agent 或安装全局 skills |
 | `@signal-room/workflow-read-model` | 服务端范围查询与安全投影；`/contracts` 是浏览器安全类型入口 |
 | `@signal-room/workflow-space-api` | Space 查询与受限业务命令的 HTTP 合同和服务适配 |

@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@openai/agents": "0.20.0",
-    "@signal-room/workflow": "0.1.0"
+    "@signal-room/workflow": "0.1.0",
+    "openai": "7.32.0"
   }
 }

@@ -151,4 +151,46 @@ suite("PostgreSQL workflow ledger", () => {
     expect((await reopened.listEvents(first.run.id)).some((event) => event.type === "step.reused")).toBe(true);
     await secondPool.end();
   });
+
+  it("persists decision inference atomically and reuses it through a fresh PostgreSQL store", async () => {
+    const id = workspace();
+    const store = makeStore(id);
+    const definition = { id: "review", revision: "1", provider: "test", model: "local", timeoutMs: 1000,
+      questions: [{ type: "predicate" as const, name: "supported", instructions: "Is it supported?" }] };
+    const inferred = { provider: "test", model: "local",
+      answers: [{ type: "predicate" as const, name: "supported", probability: 0.8 }] };
+    const workflow = { id: "decision-postgres-replay", revision: "1", execute: async (ctx: WorkflowContext) => {
+      const inference = await ctx.decision("infer", definition, { text: "Evidence" });
+      const recorded = ctx.decide("record", { approved: true });
+      return { inference, recorded };
+    } };
+    let calls = 0;
+    const decisionRunner = { provider: "test", revision: "mock-1", run: async () => { calls++; return inferred; } };
+    const agentRunner = { run: async () => { throw new Error("Unexpected agent run"); } };
+    const first = await runWorkflow({ workflow, input: null, store, agentRunner, decisionRunner });
+    expect(first.run.state).toBe("succeeded");
+    expect(first.output).toEqual({ inference: inferred, recorded: { approved: true } });
+    const decisionStep = (await store.listSteps(first.run.id)).find((step) => step.kind === "decision");
+    expect(decisionStep).toMatchObject({ state: "succeeded", validation: "valid", output: inferred });
+    expect((await store.listAttempts(decisionStep!.id)).map((attempt) => attempt.state)).toEqual(["succeeded"]);
+    const firstEvents = await store.listEvents(first.run.id);
+    expect(firstEvents.map((event) => event.type)).toContain("decision.inference.completed");
+    expect(firstEvents.filter((event) => event.type === "decision.recorded")).toHaveLength(1);
+    expect(firstEvents.some((event) => event.type === "step.completed" && event.stepRunId === decisionStep!.id)).toBe(true);
+
+    const secondPool = new Pool({ connectionString: url! });
+    try {
+      const reopened = new PostgresWorkflowRunStore(secondPool, { workspaceId: id });
+      const replay = await runWorkflow({ workflow, input: null, store: reopened, agentRunner,
+        decisionRunner, resumeRunId: first.run.id });
+      expect(replay.output).toEqual(first.output);
+      expect(calls).toBe(1);
+      const events = await reopened.listEvents(first.run.id);
+      expect(events.filter((event) => event.type === "decision.inference.completed")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "decision.recorded")).toHaveLength(1);
+      expect(events.some((event) => event.type === "step.reused" && event.stepRunId === decisionStep!.id)).toBe(true);
+    } finally {
+      await secondPool.end();
+    }
+  });
 });
