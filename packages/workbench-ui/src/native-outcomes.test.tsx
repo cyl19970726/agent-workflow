@@ -54,6 +54,14 @@ describe('native run outcome reading', () => {
     expect(html.match(/真实子流程成果/g)).toHaveLength(1);
   });
 
+  it('does not count an imported failure memo as a produced outcome of its associated run', () => {
+    const client = new QueryClient();
+    published(client, run, [{ ...asset('failure-memo', '外部失败说明'), sourceKind: 'import' }]);
+    const html = outcome(client, run, emptyProcess);
+    expect(html).toContain('已发布成果 · 0 项');
+    expect(html).not.toContain('外部失败说明');
+  });
+
   it('keeps native ledger records separate from ordinary harness sessions', () => {
     const client = new QueryClient();
     const ordinary = render(client, createElement(NativeRunEvents, {
