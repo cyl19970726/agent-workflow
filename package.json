@@ -24,7 +24,9 @@
     "test:spaces": "node scripts/test-spaces.mjs",
     "siwc": "node packages/agent-sdk/dist/cli.js",
     "example:opensandbox-live": "node examples/opensandbox-live.mjs",
-    "example:opensandbox-csv": "node examples/opensandbox-csv.ts"
+    "example:opensandbox-csv": "node examples/opensandbox-csv.ts",
+    "example:opensandbox-shared": "node examples/opensandbox-shared.ts",
+    "build:opensandbox-image": "node scripts/build-opensandbox-image.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.2.1",
