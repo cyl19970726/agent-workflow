@@ -18,7 +18,7 @@ flowchart TB
     I[版本 · 评价 · 比较 · 采用记录]
     H[节点 harness<br/>装配配置与能力 · 记录执行]
     C[工作流执行核心]
-    E[执行器适配<br/>一般 Agent SDK · Codex · 程序任务]
+    E[执行器适配<br/>默认 Agents SDK · opt-in OpenSandbox · 程序任务]
     A[CLI / tool / 程序接口]
     D[共享存储服务]
     P[(PostgreSQL)]
@@ -40,7 +40,7 @@ flowchart TB
 | --- | --- | --- |
 | 业务定义入口 | 定义、注册、版本和扩展约定 | 业务流程与阶段、角色目的、提示词、领域工具、资产 schema |
 | 执行核心 | 步骤身份、分支与并行、阶段、验证、节点复用和恢复语义 | 业务分支条件、返工方式、领域停止条件 |
-| 执行器 | 一般 SDK 与 Codex 适配、运行配置与事件统一、能力差异说明 | 为角色选择模型、方法、所需工具与允许范围 |
+| 执行器 | 默认 Agents SDK runner、opt-in OpenSandbox 容器内 Codex/Agents SDK、运行配置与事件统一、能力差异说明 | 为角色选择模型、方法、所需工具与允许范围 |
 | 资产与执行 harness | 包裹节点执行，装配配置、上下文和存储 CLI / tools，记录与提交产物、会话和工具过程 | 声明输入依赖、输出类型和业务可见性 |
 | 持久化 | 面向执行器的共享存储服务、PG 与对象存储适配、提交和恢复、持久记录及读取接口 | 业务数据与授权策略；提供部署配置，不自建第二套资产系统 |
 | 迭代与评价 | 工作流版本、四问、比较、判者与标准版本、采用和回退记录 | 业务判据、校准案例与采用授权 |
@@ -81,13 +81,13 @@ PostgreSQL 是目标中的业务事实源。Workflow Space 对应一个业务目
 
 运行时可以使用临时文件、工具工程目录和缓存。它们是执行材料，不承担长期唯一正本。当前方案建议大媒体使用托管私有对象存储，PG 管理其身份、版本、位置清单和来源；具体 provider 尚未开通。执行器经统一资产接口读写，需要文件时物化到本次执行目录，不把本机路径当作持久身份。两个后端的提交协议、上传对账和备份恢复见完整方案。
 
-## 一般 SDK 与 Codex 如何共存
+## Agent SDK 与 Codex 的执行边界
 
-执行核心通过现有 `AgentRunner` 端口调用 Agent；已有 Space runtime 桥接可为节点记录输入、配置和可观测事件，Codex 继续适用于需要工程目录和代码工具的节点。可选 SIWC Responses 适配器支持宿主注入工具；一般 Agents SDK 仍是目标。确定性计算、装配和校验保留为程序任务。
+执行核心仍通过 `AgentRunner` 端口调用 Agent；默认共享持久路径由官方 `@openai/agents` SDK 驱动，SIWC 是受限的 Responses model transport。另有显式 opt-in 的 OpenSandbox 适配路径：`createOpenSandboxEnvironment` 创建外层环境 owner，`createContainerAgentRunner` 在容器内运行完整 Codex CLI 或 Agents SDK loop。模型 loop、工具循环和工作文件都在容器里；授权由宿主通过 OpenSandbox 原生 Credential Vault 按路由绑定。Codex CLI 在这里是容器 runtime，不是已退役的宿主 Codex runner，也不是其他 runner 失败时的 fallback。
 
-不同 SDK 的会话、工具权限、恢复和流式事件能力不必相同。适配层需要声明实际支持范围，保存原生会话标识与可获取记录。不能仅因为设置了 prompt，就宣称已完成工具隔离；也不能把数据库历史重放写成能够恢复原生会话的任意内部状态。
+一个 owner 绑定一个 workflow run。同一 run 的 Agent 节点按序连接并共享同一环境；调用 `runWorkflow` 时必须在 `metadata.openSandboxEnvironment` 提供准确的 owner binding（节点收到的是 `runMetadata.openSandboxEnvironment`），避免部分恢复把旧上游结果拼到新空环境。节点失败、取消或执行状态未知会失效整个环境；外层负责 finally 回收。该原型不提供跨 run 环境恢复、持久 Space lease、worker 重启对账、生产 claim fence 或 R2/对象存储链路。真实运行证据与具体接口见 [OpenSandbox 指南](opensandbox.md)。
 
-现有 `CodexSdkRunner` 使用 Codex SDK/CLI；SIWC 方案是 Responses 协议适配器，不是 OpenAI Agents SDK 集成。合成材料的生产和独立审阅工具链已实跑，业务质量、原生会话恢复和完整部署仍待验收。
+不同 SDK 的会话、工具权限、恢复和流式事件能力不必相同。适配层需要声明实际支持范围，保存可获得的标识与事件；run replay 也不等于恢复任意 SDK 内部状态。OpenSandbox 的完整容器 loop 已实测，但不能据此推导出所有默认 AgentRunner 都运行在容器内，或宣称原生 session 恢复、业务质量和生产部署已验收。确定性计算、装配和结果校验仍可作为普通程序任务。
 
 ## 工作台与评价如何接入
 
@@ -101,7 +101,7 @@ Space 默认统一工作流、业务、资产三个工作台，评价就近发�
 
 当前目标可先部署在一台常驻服务器：运行共享服务、worker 和 PostgreSQL，接入业务定义。PostgreSQL 可以与服务同机，也可以独立托管；数据库不要求每个 workflow 各有一台 VM。
 
-本阶段不建设通用临时 VM 调度。可选的 [OpenSandbox 节点工作区](opensandbox.md) 将选定 Agent 的文件与命令放入容器；SDK 和业务服务仍在宿主，生产 Space 的环境恢复与提交 fence 尚未接入。执行结束、停止工作进程、清理缓存和删除长期资产是不同动作。完成执行不自动释放仍需排查的工作环境，不自动删除历史；保留与清理策略需要显式配置。
+本阶段不建设通用临时 VM 调度。[OpenSandbox 容器内 Agent 路径](opensandbox.md)是显式 opt-in：选定的 Codex CLI 或 Agents SDK 完整 loop 在容器内执行，宿主负责 environment owner、Vault provisioning、输入物化、结果验收和资产发布。已实测的范围仅覆盖该适配器路径；它不改变其他 `AgentRunner` 的默认行为，也不提供生产 Space 的环境恢复与提交 fence。执行结束、停止工作进程、清理缓存和删除长期资产是不同动作；保留和回收策略仍须显式配置。
 
 ## 文档各写在哪里
 

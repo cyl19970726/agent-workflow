@@ -1,4 +1,10 @@
-/** Opt-in: real Codex + Agents SDK inside one sandbox, host validation, PostgreSQL and replay. */
+/**
+ * Primary OpenSandbox example: complete Codex + Agents SDK nodes share one container serially.
+ * Explicit execution uses real model authorization, an OpenSandbox service and PostgreSQL.
+ * Run: node --env-file=/absolute/path/to/private.env examples/opensandbox-shared.ts
+ * Setup, expected results and legacy examples: ../docs/opensandbox.md
+ * Importing this module or running check:examples does not execute either model.
+ */
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -21,6 +27,7 @@ function required(name: string): string {
 }
 
 export async function runOpenSandboxSharedExample() {
+  // 1. The outer owner selects the immutable environment and narrow native Vault routes.
   const connectionString = required("WORKFLOW_DATABASE_URL");
   const model = required("SIWC_MODEL");
   const protocol = process.env.OPEN_SANDBOX_PROTOCOL ?? "http";
@@ -54,6 +61,7 @@ export async function runOpenSandboxSharedExample() {
   let store = new PostgresWorkflowRunStore(pool, {workspaceId});
   try {
     await migratePostgresWorkflowStore(pool);
+    // 2. Each node chooses its runtime, prompt and policy fingerprint independently.
     const limits = { timeoutMs: 120_000, maxTurns: 8, maxToolCalls: 8, maxOutputBytes: 256 * 1024 };
     const codexPolicy: ContainerAgentPolicy = { runtime:"codex-cli", limits };
     const sdkPolicy: ContainerAgentPolicy = { runtime:"agents-sdk", limits,
@@ -66,6 +74,7 @@ export async function runOpenSandboxSharedExample() {
       config:{...containerAgentConfig(environment.binding.profileDigest,sdkPolicy),outputFormat:"json",
         instructions:"Read the real summary.json in the shared workspace using read_file (root workspace, path summary.json). Count its categories and sum the totals. Write review.json with numeric categoryCount and grandTotal using write_file, then read it back. Do not change summary.json. Return a short JSON completion object. A prior node made the file; do not assume its contents."}});
     const input = {csv:CSV};
+    // 3. Durable artifact dependencies are explicit; the shared filesystem is temporary.
     const flow=workflow<typeof input,unknown>("sandbox.shared-agents",{revision:"1"},async(ctx,frozen)=>{
       const summary=await ctx.agent("author",author,frozen);
       const asset=await ctx.publish("summary","csv-summary",summary,{revision:"1",validation:"valid",review:"pending"});
@@ -94,6 +103,7 @@ export async function runOpenSandboxSharedExample() {
         return {...result,validation:"valid",output:{...actual,sha256:sha256(bytes)}};
       }});
     const runner:AgentRunner={run:request=>request.definition.id==="author"?codexRunner.run(request):sdkRunner.run(request)};
+    // 4. Bind this run to the exact environment; partial resume may not substitute an empty one.
     const outcome=await runWorkflow({workflow:flow,input,store,agentRunner:runner,
       metadata:{openSandboxEnvironment:environment.binding}});
     runId=outcome.run.id;
@@ -111,6 +121,7 @@ export async function runOpenSandboxSharedExample() {
     assert.equal(cleanup.clientClose,"succeeded");
     await store.appendEvent({runId,type:"opensandbox.environment.cleanup",data:{...environment.binding,...cleanup}});
     await pool.end();
+    // 5. Persistence and completed replay must work even after the container is gone.
     pool=new Pool({connectionString,max:4});
     store=new PostgresWorkflowRunStore(pool,{workspaceId});
     const saved=await store.getArtifactPayload(artifact.id) as {categoryCount:number;grandTotal:number};

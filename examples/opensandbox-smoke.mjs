@@ -1,4 +1,8 @@
-/** Deterministic local smoke: no OpenSandbox service, PostgreSQL, or model. */
+/**
+ * Legacy host-loop/tool-container adapter smoke; all execution below is fake.
+ * No OpenSandbox service, PostgreSQL or model. This does not test the in-container worker.
+ * For complete container-resident nodes, see opensandbox-shared.ts and ../docs/opensandbox.md.
+ */
 import assert from "node:assert/strict";
 import { createOpenSandboxAgentRunner, openSandboxAgentConfig, readBoundedSandboxBytes } from "@signal-room/workflow-opensandbox";
 

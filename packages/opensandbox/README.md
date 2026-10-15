@@ -4,6 +4,17 @@ The primary path runs the complete Codex CLI or OpenAI Agents SDK loop inside a 
 
 For full integration, image-build commands, environment variables, security limits, and PR #9 historical evidence, see [the OpenSandbox guide](../../docs/opensandbox.md) and [the shared example](../../examples/opensandbox-shared.ts).
 
+## Choose an example
+
+| Example | Runtime placement and purpose |
+| --- | --- |
+| [opensandbox-shared.ts](../../examples/opensandbox-shared.ts) | Start here: complete Codex CLI and Agents SDK nodes share one sandbox; native Vault, host byte validation, PG artifacts and completed replay |
+| [opensandbox-smoke.mjs](../../examples/opensandbox-smoke.mjs) | Legacy tool-adapter wiring with fake execution; no service or model |
+| [opensandbox-live.mjs](../../examples/opensandbox-live.mjs) | Legacy adapter's real container file/command checks; no model or database |
+| [opensandbox-csv.ts](../../examples/opensandbox-csv.ts) | Legacy host Agents SDK loop with container Python tools, PG and replay |
+
+The legacy examples use `OPEN_SANDBOX_IMAGE_DIGEST` and a `python` executable. The new shared example uses `OPEN_SANDBOX_AGENT_IMAGE`, which must contain the fixed worker, Codex CLI and Agents SDK. Their images and environment variables are not interchangeable. See the guide for exact prerequisites and expected results. The default checks do not run either live model example.
+
 ## Shared environment lifecycle
 
 Create an environment from host-selected immutable profile settings and credential bindings. Credential values are supplied only by an in-memory callback and provisioned through the native Vault; do not put them in the job, prompt, image, or workspace files.
@@ -11,9 +22,8 @@ Create an environment from host-selected immutable profile settings and credenti
 ```ts
 const environment = await createOpenSandboxEnvironment({ connection, profile, credentials });
 const policy = { runtime: "codex-cli", limits } satisfies ContainerAgentPolicy;
-const runner = createContainerAgentRunner({ environment, policy, prepare, finish });
-
 try {
+  const runner = createContainerAgentRunner({ environment, policy, prepare, finish });
   const outcome = await runWorkflow({
     workflow,
     input,

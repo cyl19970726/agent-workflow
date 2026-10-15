@@ -2,7 +2,7 @@
 
 接入前用 [设计](./designing-workflows.md)、[评估](./evaluating-workflows.md)、[优化](./optimizing-workflows.md)三份指南明确意图、交付和验收。方法建议与库已实现能力分别记录；下面说明现有执行基础设施的边界。
 
-新持久执行统一使用 **PostgreSQL + 官方 OpenAI Agents SDK**：PostgreSQL `RunStore`／Space 服务记录 run 与资产，`OpenAIAgentsSdkRunner` 负责 Agent/tool loop，SIWC 只负责当前 runner 所用的 ChatGPT 授权与 Responses model transport。具体实现状态和缺口见[建设路线](harness-roadmap.md)。SQLite 只用于明确启动的只读历史导入，Codex 历史 trace 由 read-model 只读解码；二者都不是新的执行路径或 fallback。接口边界见[Space 存储指南](space-storage.md)、[执行 harness 架构](postgres-sdk-plan.md)与[架构](architecture.md)。
+默认持久 Agent 路径使用 **PostgreSQL + 官方 OpenAI Agents SDK**：PostgreSQL `RunStore`／Space 服务记录 run 与资产，`OpenAIAgentsSdkRunner` 负责 Agent/tool loop，SIWC 负责当前 runner 的 ChatGPT 授权与 Responses model transport。另有显式 opt-in 的 [OpenSandbox 路径](opensandbox.md)，可把完整 Codex CLI 或 Agents SDK loop 放进容器，通过原生 Vault 供给授权，并让同一 run 的多个节点串行共享一个环境；这不会自动替换其他 runner，也没有跨 run 环境恢复或生产 Space lease/fence。SQLite 只用于明确启动的只读历史导入，Codex 历史 trace 由 read-model 只读解码；已退役的 host Codex runner 不作 fallback。实现状态和缺口见[建设路线](harness-roadmap.md)，其他接口边界见[Space 存储指南](space-storage.md)、[执行 harness 架构](postgres-sdk-plan.md)与[架构](architecture.md)。
 
 下文的“宿主”表示装配和运行应用的服务层，负责唯一任务队列、租约、worker 并发、HTTP 权限与读模型接入。它可以由 agent-workflow 的共享服务模块提供；research、analysis、creation 的业务流程、资产类型、政策和阅读器仍由各自工作台维护。
 
@@ -18,7 +18,9 @@
   ├─ AgentRunner
   │    └─ OpenAIAgentsSdkRunner（官方 SDK Agent / Runner / tool）
   ├─ SIWC model transport
-  │    └─ 当前 ChatGPT authorization + Responses 路由；无 Codex/API-key/SQLite 执行 fallback
+  │    └─ 默认 host AgentRunner 的 ChatGPT authorization + Responses 路由
+  ├─ OpenSandbox（仅显式 opt-in）
+  │    └─ Codex CLI / Agents SDK 完整容器 loop；原生 Vault；同 run 串行共享环境
   ├─ skill bundle snapshot
   │    └─ @signal-room/workflow-skill-snapshot；由宿主冻结并绑定 revision
   └─ 安全读模型
@@ -43,7 +45,7 @@
 
 `@signal-room/workflow-sqlite` 与 `@signal-room/workflow-codex` 已从共享执行包集合移除。SQLite 仅在用户明确选择时，由消费项目的只读历史导入工具读取并转换到 PostgreSQL；导入不得回写源库、参与新 workflow 执行、被自动选为 `RunStore`，或在 PG 连接失败时成为 fallback。每个消费项目需要核对导入范围、数量、状态与内容 hash。
 
-既有 Codex attempt trace 仍可作为历史证据。共享 `@signal-room/workflow-read-model` 提供只读 decoder，可摘要显式指定的旧 attempt 目录；它不会继续 Codex session、运行命令、改写 trace 或创建可执行 run。当前模型执行由官方 Agents SDK runner 管理，skill bundle 由 `@signal-room/workflow-skill-snapshot` 独立捕获和物化。
+既有 Codex attempt trace 仍可作为历史证据。共享 `@signal-room/workflow-read-model` 提供只读 decoder，可摘要显式指定的旧 attempt 目录；它不会继续旧 Codex session、运行命令、改写 trace 或创建可执行 run。默认模型执行由官方 Agents SDK runner 管理；OpenSandbox 中的 Codex CLI 是另一条显式 opt-in 的容器执行路径，不是历史 trace runner 或宿主 fallback。skill bundle 由 `@signal-room/workflow-skill-snapshot` 独立捕获和物化。
 
 ## HTTP 与事件读取
 
@@ -70,7 +72,7 @@ Phase 是用户理解成果的入口，workflow/step/attempt 是执行审计层�
 
 ## 与 self-media #71 的关系
 
-[self-media #71](https://github.com/cyl19970726/self-media-content-intelligence/issues/71) 描述了单帖/博主研究、定向修复、阶段工作台和生产迁移目标。本仓库提供可组合 workflow、replay、具名并发、phase、资产来源、PostgreSQL 持久账本与官方 Agents SDK runner。下列是消费宿主需承担的实现与验收责任：
+[self-media #71](https://github.com/cyl19970726/self-media-content-intelligence/issues/71) 描述了单帖/博主研究、定向修复、阶段工作台和生产迁移目标。本仓库提供可组合 workflow、replay、具名并发、phase、资产来源、PostgreSQL 持久账本、默认官方 Agents SDK runner，以及独立 opt-in 的 OpenSandbox 容器 runner。OpenSandbox 共享环境本身不等于生产 Space lease、跨 run 恢复或提交 fence。下列是消费宿主需承担的实现与验收责任：
 
 - 复用现有研究任务队列、租约和全局模型并发限制的 dispatcher；
 - 单帖与博主的 prepare/build/review/repair 业务 workflow 及晋升规则；

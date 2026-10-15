@@ -4,6 +4,20 @@
 
 一个 `createOpenSandboxEnvironment` owner 对应一个 workflow run。同一 run 的多个 Agent 节点通过 `createContainerAgentRunner` 串行连接并共享同一个 sandbox 和 `/work/shared`。调用 `runWorkflow` 时必须把准确的 `environment.binding` 放在 `metadata.openSandboxEnvironment`，它会作为节点请求的 `runMetadata.openSandboxEnvironment` 传入；环境 owner 会在每次借用时核对 sandbox ID、profile digest 和 run ID。这样部分恢复不会把旧步骤结果接到新建的空环境。节点失败、取消或命令状态未知会使共享环境失效并由 owner 回收；外层仍应在 `finally` 中调用 `dispose()`。
 
+## 选择哪个 example
+
+新接入从 **`opensandbox-shared.ts`** 开始。其余三个 `opensandbox-*` 示例保留旧工具适配路径，便于回归和迁移；它们不验证完整 Agent loop 在容器内运行。
+
+| 示例 | 执行方式 | 需要哪些服务 | 主要验证 |
+| --- | --- | --- | --- |
+| [opensandbox-shared.ts](../examples/opensandbox-shared.ts) | **新路径**；Codex CLI 与 Agents SDK 两个完整节点在同一个容器中串行执行 | OpenSandbox、固定 worker 镜像、已有 Codex/SIWC 授权、PostgreSQL | 同一文件跨节点传递、原生 Vault、宿主校验、资产依赖、重连读回、完成后 replay 和清理 |
+| [opensandbox-smoke.mjs](../examples/opensandbox-smoke.mjs) | 旧工具适配器；全部 fake，不调用模型 | 无外部服务 | 文件／命令工具装配、事件和 cleanup 调用；不能证明真实容器运行 |
+| [opensandbox-live.mjs](../examples/opensandbox-live.mjs) | 旧工具适配器；真实容器、确定性驱动，不调用模型 | OpenSandbox、包含 `python` 的固定 digest 镜像 | 原始文件／图片字节、实际命令取消、输出超限、环境删除 |
+| [opensandbox-csv.ts](../examples/opensandbox-csv.ts) | 旧路径；Agents SDK loop 在宿主，Python 工具在容器 | OpenSandbox、包含 `python` 的固定 digest 镜像、SIWC 授权、PostgreSQL | 单节点 CSV 汇总、宿主校验、PG 与 replay |
+| [agents-sdk-workflow.ts](../examples/agents-sdk-workflow.ts) | 普通宿主 Agents SDK，无 OpenSandbox | 显式调用导出函数时需要模型授权和调用方提供的 store | skill snapshot、Agent 定义与 workflow 组合 |
+
+新的完整节点取消已实测，但当前没有独立公开的 `opensandbox-cancel` 示例；旧 `opensandbox-live` 的命令取消不能代替它。新增路径的可重复确定性回归在 [环境 owner 测试](../packages/opensandbox/src/environment.test.ts)、[节点 runner 测试](../packages/opensandbox/src/container.test.ts)和[容器 worker 测试](../packages/opensandbox/src/container-worker.test.ts)，这些测试不创建容器或调用模型。
+
 ## 主路径：容器内 Codex 与 Agents SDK
 
 [共享环境示例](../examples/opensandbox-shared.ts)展示两种 runtime 在同一 workflow run 中先后执行：Codex CLI 生成共享文件，Agents SDK 节点读取并复核，再由宿主校验和发布。其主要 API 形状如下：
@@ -11,18 +25,20 @@
 ```ts
 const environment = await createOpenSandboxEnvironment({ connection, profile, credentials });
 const policy = { runtime: "codex-cli", limits } as const;
-const runner = createContainerAgentRunner({ environment, policy, prepare, finish });
-
-const outcome = await runWorkflow({
-  workflow,
-  input,
-  store,
-  agentRunner: runner,
-  metadata: { openSandboxEnvironment: environment.binding },
-});
-
-// The workflow owns the shared environment lifetime.
-const cleanup = await environment.dispose();
+try {
+  const runner = createContainerAgentRunner({ environment, policy, prepare, finish });
+  const outcome = await runWorkflow({
+    workflow,
+    input,
+    store,
+    agentRunner: runner,
+    metadata: { openSandboxEnvironment: environment.binding },
+  });
+} finally {
+  // The workflow owns the shared environment lifetime, including failure paths.
+  const cleanup = await environment.dispose();
+  // Persist/inspect cleanup; a returned receipt does not necessarily mean success.
+}
 ```
 
 实际接入应把 `dispose()` 放在 `try/finally`，不要只在成功分支回收。Codex 与 Agents SDK 使用各自显式的 `ContainerAgentPolicy`；Agent 定义需要合并 `containerAgentConfig(environment.binding.profileDigest, policy)` 返回的两个指纹字段。运行时会拒绝定义和 runner 的策略不一致。
@@ -30,6 +46,19 @@ const cleanup = await environment.dispose();
 `profile` 必须使用固定 digest 的镜像、明确 TTL 和资源；网络默认拒绝，仅接受有限 FQDN 规则。配置 `credentialBindings` 时，宿主 `credentials()` callback 只在创建期间提供原生 Vault credential entries。Vault proxy 按 binding 的 host、scheme、port、method 和 path 注入授权；不要把凭据放进 job JSON、工作文件、镜像、模型 prompt 或日志。OpenSandbox 管理 API 的连接 key 仍只由宿主用于管理面调用。
 
 示例的授权读取现有、已授权的 Codex ChatGPT 登录，并通过 Agents SDK 的 SIWC 适配器取得相应凭据；这两种授权都通过原生 Vault 的精确路由规则供容器使用。示例会另外连接 PostgreSQL，使用 `ctx.publish` 保存宿主验收过的结果，并在新连接中验证资产读回和已完成 run 的 replay。
+
+### 共享示例的阅读顺序
+
+| 代码位置 | 要理解的设计 |
+| --- | --- |
+| `profile` 与 `credentials()` | 外层选环境与精确授权路由；真实凭据不进入节点 job |
+| `codexPolicy`、`sdkPolicy`、`author`、`reviewer` | 两种 runtime 各自定义提示词、限制和策略指纹；SDK 的 `tools` 不适用于 Codex 原生 shell |
+| `flow` | `author → 发布 summary → reviewer → 发布 review`；review 资产依赖 summary |
+| `prepare` 与两个 `finish` | 输入 CSV 写入容器；宿主读取真实产物，分别核验 `A=4/B=2` 与类别数 `2`、总额 `6`，再标记节点 `valid` |
+| `runWorkflow` 与事件检查 | 同一 binding 贯穿两个节点；两个 connect 事件必须指向同一 sandbox |
+| `dispose`、新建 PG 连接与 `replay` | 容器可销毁，已发布结果仍可读取；已完成步骤复用不应重新调用模型 |
+
+要接自己的业务，替换输入、提示词、工具、产物 schema 和宿主验收规则，并提升相应 revision；不要把示例中的固定 CSV 答案当成通用 evaluator。同一示例已经覆盖单个 Codex 节点与单个 SDK 节点的配置，不需要复制两套环境管理实现。
 
 ### 构建本机测试镜像
 
@@ -68,15 +97,27 @@ npm run build:opensandbox-image -- --base docker.io/library/node@sha256:<该架�
 | `CODEX_AUTH_FILE` | 可选；已有 Codex ChatGPT 登录文件路径，默认读取 `~/.codex/auth.json` |
 
 ```bash
-npm run example:opensandbox-smoke
+npm run check:examples
 node --env-file=/absolute/path/to/private.env examples/opensandbox-shared.ts
 ```
 
-`example:opensandbox-smoke` 不连接模型或 OpenSandbox。共享示例会实际创建一个环境、调用模型、运行两个容器内节点并连接 PostgreSQL，因此应只在授权和测试服务都已准备好时显式运行。Codex 和 Agents SDK 的模型许可、轮数、工具数、运行时限及输出上限由示例中的策略定义；外层环境 TTL 还必须覆盖节点执行与清理时间。
+`check:examples` 只类型检查，不运行共享示例。共享示例会实际创建一个环境、调用模型、运行两个容器内节点并连接 PostgreSQL，因此应只在授权和测试服务都已准备好时显式运行。Codex 和 Agents SDK 的模型许可、轮数、工具数、运行时限及输出上限由示例中的策略定义；外层环境 TTL 还必须覆盖节点执行与清理时间。
+
+成功输出应包含 `state: "succeeded"`、`sharedNodes: 2`、两个 runtime、run／workspace／artifact ID，以及 `payloadReadAfterReconnect: true`、`replayedWithoutExecution: true` 和 cleanup 的两项 `succeeded`。失败返回非零退出码；已创建的 run 应按准确 ID 查看 PG 事件，不把失败重跑覆盖为原 run 的成功。示例保留数据库记录，清理的是自己创建的 sandbox；外部 OpenSandbox server 与 PostgreSQL 由运行者管理。
 
 ## 旧接口：宿主 Agent loop 与容器工具
 
 `createOpenSandboxAgentRunner` 是 PR #9 保留的旧路径：官方 Agents SDK、SIWC 模型调用和授权留在宿主，只把注册的 workspace 工具调用转交 OpenSandbox sandbox。它不代表 Codex CLI 或完整 Agents SDK loop 在容器内运行；新接入应使用 `createOpenSandboxEnvironment` 与 `createContainerAgentRunner`。旧接口仅用于现存调用迁移期间的显式兼容，不是自动选择的后备路径，也不得在新主路径失败时静默切换到 host runner。
+
+旧示例使用 `OPEN_SANDBOX_IMAGE_DIGEST`，需要镜像中有 `python`；新共享示例使用 `OPEN_SANDBOX_AGENT_IMAGE`，需要包含固定 worker、Codex CLI 与 Agents SDK。两种镜像变量和镜像要求不能直接互换。旧路径按需单独运行：
+
+```bash
+npm run example:opensandbox-smoke
+node --env-file=/absolute/path/to/private-legacy.env examples/opensandbox-live.mjs
+node --env-file=/absolute/path/to/private-legacy.env examples/opensandbox-csv.ts
+```
+
+`smoke` 不需要 env；`live` 需要管理地址、API key 和镜像；`csv` 还需要 `WORKFLOW_DATABASE_URL`、`SIWC_MODEL` 和已有 SIWC 授权。它们不是运行新共享示例的前置步骤。
 
 ## 行为与安全边界
 

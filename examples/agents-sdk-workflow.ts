@@ -1,3 +1,4 @@
+/** Host Agents SDK + frozen skill example; no OpenSandbox. See opensandbox-shared.ts for container nodes. */
 import { defineAgent, runWorkflow, workflow, type RunStore } from "@signal-room/workflow";
 import { OpenAIAgentsSdkRunner, SiwcAuth } from "../packages/agent-sdk/dist/index.js";
 import { snapshotSkill } from "../packages/skill-snapshot/dist/index.js";

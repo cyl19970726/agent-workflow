@@ -1,4 +1,9 @@
-/** Opt-in real container acceptance. No model or database calls. Never run from default CI. */
+/**
+ * Legacy tool-container adapter acceptance: real files/commands, deterministic host driver.
+ * No model or database calls; this does not run a complete Agent loop inside the container.
+ * Requires OPEN_SANDBOX_IMAGE_DIGEST with a `python` executable. Never run from default CI.
+ * For the new worker image and shared Agent nodes, see opensandbox-shared.ts and ../docs/opensandbox.md.
+ */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Sandbox, SandboxManager } from "@alibaba-group/opensandbox";

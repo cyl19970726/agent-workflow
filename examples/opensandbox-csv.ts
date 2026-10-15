@@ -1,4 +1,9 @@
-/** Opt-in live example. Requires an OpenSandbox service, PostgreSQL, and SIWC login. */
+/**
+ * Legacy opt-in CSV example: Agents SDK/model loop stays on the host; Python tools run in OpenSandbox.
+ * Requires OpenSandbox, OPEN_SANDBOX_IMAGE_DIGEST with `python`, PostgreSQL and SIWC login.
+ * For complete in-container nodes using OPEN_SANDBOX_AGENT_IMAGE, start with opensandbox-shared.ts.
+ * Setup and the distinction between examples: ../docs/opensandbox.md
+ */
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
