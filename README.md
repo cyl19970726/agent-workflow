@@ -43,6 +43,7 @@ npm run verify
 | [失败后恢复](examples/failure-recovery.mjs) | 保留成功分支资产、只重试失败角色、恢复阶段绑定、区分执行完成与内容仍有意见 |
 | [前端工作台](examples/read-model-web.mjs) | 本机浏览器查看安全快照、失败 attempt、显式重试和增量更新；运行后打开终端显示的地址 |
 | [PostgreSQL 存储](examples/postgres-run.mjs) | 确定性 task 写入 PG；新建连接读回并校验正文，再对同一 run replay；不调用模型。需设置 `WORKFLOW_DATABASE_URL` |
+| [OpenSandbox 节点工作区](docs/opensandbox.md) | 可选容器文件／命令适配，模型循环留在宿主；真实容器与模型验证单独显式运行 |
 | [Agents SDK 接入](examples/agents-sdk-workflow.ts) | 官方 `Agent`／`Runner.run`、skill hash 绑定、PostgreSQL store 由宿主传入；默认只类型检查，调用导出函数才会运行模型 |
 
 ## 文档
@@ -80,6 +81,7 @@ npm run verify
 | `@signal-room/workflow-space-contracts` | JSON Schema 注册与依赖冻结、节点存储合同、字段视图与动作校验 |
 | `@signal-room/workflow-spaces` | PG 空间领域、版本与会话、受限 client/tools、core 桥接、评价比较和只读控制台 |
 | `@signal-room/workflow-agent-sdk` | 官方 Agents SDK `AgentRunner`、SIWC Responses 传输；见包内 README 的已实现范围 |
+| `@signal-room/workflow-opensandbox` | 可选 OpenSandbox 节点工作区原型；宿主 SDK 调用容器工具，不含生产 Space 环境恢复与提交 fence |
 | `@signal-room/workflow-skill-snapshot` | Provider-independent skill bundle capture、validation 与 materialization；不调用 Agent 或安装全局 skills |
 | `@signal-room/workflow-read-model` | 服务端范围查询与安全投影；`/contracts` 是浏览器安全类型入口 |
 | `@signal-room/workflow-space-api` | Space 查询与受限业务命令的 HTTP 合同和服务适配 |
