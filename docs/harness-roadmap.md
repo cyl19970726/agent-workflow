@@ -10,6 +10,10 @@
 
 **有界内容对照和修复后的单案例实用路径已完成独立复验。** 认知侧从新界面发起同条件 MiMo 基线与候选，两边各三稿后未收敛，准确终稿的独立 Agent A 四问、比较、问题、处理决定和 iteration 均已落入 PostgreSQL。机制解释有局部改善，表达负担仍重，不能宣布作品合格或方法已采用。额度条件已由这两条真实运行核验；此前额度和工具契约失败保留。默认图、就近详情、状态、评价身份、跨运行双稿和版本迭代入口已修复并实际走通，手机阅读及返回也已检查。计划列表部分首读仍约3.4秒；旧实验版本因新部署指纹当前不可再次执行，下一次新运行须登记准确部署。范围与未完成项见[前端实施计划](space-frontend-implementation-plan.md)，内容结论见[认知记录](cognition-execution-loop.md#修复后的真实执行与配对2026-10-07)。
 
+## OpenSandbox 节点工作区增量（2026-10-15）
+
+新增并已实测显式 opt-in 的 [OpenSandbox 容器内 Agent 路径](opensandbox.md)：Codex CLI 或 Agents SDK 完整 loop 在容器内执行，使用原生 Vault，并允许一个 run 中的多个节点串行共享同一环境。它不改变下述既有产品验收结论，也不将所有现有 AgentRunner 切换到容器。它不支持跨 run 环境恢复；该容器路径尚未接入生产 Space 的持久环境 lease、worker 重启对账、claim fence 与 R2 链路，不是生产自动恢复能力。详细接口、历史 host-loop 验收与新路径实际验收见专项文档。通用 VM 调度继续后置。
+
 ## 当前能力与未完成目标
 
 2026-10-07 用户确认的历史清理已完成交接：在线保留当前 MiMo 两版、两次 CONTENT 运行、两次独立判者运行、30份资产及完整对照/问题/iteration；默认列表只呈现两版 CONTENT。旧测试/原型数据已转入恢复校验通过的离线归档，必要祖先身份仍可按准确ID核对。4393旧控制台与4396私有原型服务关闭，现行入口为4397；旧URL、旧格式或旧运行重放不再作为兼容承诺。下表所述保留历史以这一归档边界为准。
@@ -21,7 +25,7 @@
 | 方法理解 | 已发布版本与候选预览都能看完整方法图，点击节点读取冻结配置及资产绑定 | 任意动态代码自动生成图、通用声明／实际运行差异检查未实现 |
 | 准确版本与多选题 | 已部署工厂登记、PG 持久任务、Space 并发上限、独立取消、显式派发与中断保留已交付 | 通用历史执行包归档／加载、未知副作用的人工对账界面未完成 |
 | 评价与迭代基础 | 已有冻结计划、四问、比较、问题与 iteration；MiMo 一对真实运行和可信判者评价已记录，未采用 | 判者校准、跨案例和更大样本效果仍待证明；Agent A 通用自动调度未实现 |
-| Agent 执行器 | 官方 `@openai/agents` 管理 Agent/tool loop，SIWC 负责已授权的 Responses 传输；旧 Codex 执行器已退役，历史 trace 只读保留 | 原生会话恢复、执行器覆盖度仍有边界；当前合同见 [SDK runner](../packages/agent-sdk/README.md) |
+| Agent 执行器 | 默认路径由官方 `@openai/agents` 管理 Agent/tool loop，SIWC 负责受限 Responses 传输；显式 opt-in 的 OpenSandbox 路径已实测在容器内运行完整 Codex CLI / Agents SDK loop，并通过原生 Vault 授权。一个 run 内共享环境只支持串行节点；旧宿主 Codex runner 已退役，旧 trace 只读保留 | 该容器路径尚未接入跨 run 环境恢复、生产 Space lease、worker 重启对账、claim fence 或 R2；原生 SDK session 恢复和其他执行器覆盖度仍有边界。OpenSandbox 接口见 [专项指南](opensandbox.md)，默认 SDK runner 见 [包指南](../packages/agent-sdk/README.md) |
 | 工作台 | 共享 React 图中心界面已贯通计划内真实发起、节点与准确稿件阅读、对应内审／独立四问、计划双稿和 iteration 读回；旧控制台服务已退役 | 单案例路径通过；普通新建已实际发起一个Case；失败稿处理建议与重开正在验收，全业务写操作、交付、跨案例运营和完整手机生命周期尚未验收，部分计划首读仍慢 |
 | 新前端架构 | 共享 contracts/API/UI 与 creation 同源宿主已接 PostgreSQL；使用准确路由、Archify 和运行状态轮询 | 当前是单案例纵向路径；全业务写操作、完整增量接口和跨案例运营仍未完成 |
 | FDE 成熟度 | 内容创作是第一个验证业务；共性能力放在共享库 | 第二业务复用、真实交付收益与长期运行未验收 |

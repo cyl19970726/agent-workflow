@@ -1,8 +1,10 @@
 # Agent SDK 与历史 Codex trace
 
-新 Agent 执行使用官方 `@openai/agents` SDK，通过 `OpenAIAgentsSdkRunner` 接入 workflow `AgentRunner`。新持久运行写入 PostgreSQL。当前 runner 的 SIWC model transport 使用应用自持的 ChatGPT 授权与 Responses 路由；它不读 Codex credential，也不在授权失败时回退到 API key、Codex 或 SQLite。SDK runner 的已实现边界见[执行器包说明](../packages/agent-sdk/README.md)。完整 Agents SDK 能力面和原生 session 恢复仍有明确边界。
+默认 Agent 执行使用官方 `@openai/agents` SDK，通过 `OpenAIAgentsSdkRunner` 接入 workflow `AgentRunner`。新持久运行写入 PostgreSQL。该宿主 runner 的 SIWC model transport 使用应用自持的 ChatGPT 授权与 Responses 路由；它不读 Codex credential，也不在授权失败时回退到 API key、Codex 或 SQLite。SDK runner 的已实现边界见[执行器包说明](../packages/agent-sdk/README.md)。完整 Agents SDK 能力面和原生 session 恢复仍有明确边界。
 
 共享 `@signal-room/workflow-codex` execution package 已退役。不要用旧 `CodexSdkRunner` 配置创建新 workflow、恢复历史 Codex 线程，或把旧文件型 trace 当成 PostgreSQL run。旧 Codex trace 只能当只读历史证据；其 decoder 属于 `@signal-room/workflow-read-model`，见[decoder 实现](../packages/read-model/src/legacy-codex-trace.ts)。
+
+需要完整节点容器隔离时，可显式选择 [`@signal-room/workflow-opensandbox`](opensandbox.md) 的 `runtime: "codex-cli"` 或 `runtime: "agents-sdk"`。它通过新的固定镜像 worker 运行整个 Agent loop，授权来自原生 Credential Vault；同一 run 的节点可串行共享环境。这是独立的可选执行路径，不恢复已退役的宿主 Codex runner，也不自动改变默认 SDK runner。两种容器节点的配置与实际文件交接见 [`opensandbox-shared.ts`](../examples/opensandbox-shared.ts)。
 
 ## 冻结 skill bundle
 

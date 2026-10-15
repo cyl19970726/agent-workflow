@@ -2,7 +2,7 @@
 
 把真实业务做成能执行、能评价、能持续改进的工作流。共享项目的目标范围包含工作流执行、PostgreSQL 资产管理 harness、官方 Agent SDK 接入、版本评价与通用工作台；业务项目提供流程、工具、标准与展示扩展。
 
-**先读 [产品定位](docs/product.md) → [Space 工作台产品与交互](docs/workbench-presentation.md) → [架构](docs/architecture.md) → [实现状态](docs/harness-roadmap.md)。** Space 支持用 workflow 完成业务并持续改进方法，覆盖从业务目的、首版设计到执行、稳定运营与持续改进的生命周期。工作流内以 Archify 画布切换方法、执行、运营观察和版本演进；业务与资产提供跨案例入口，评价在对象旁展开。当前共享执行器由官方 OpenAI Agents SDK 的 Agent / Runner / tool 驱动；SIWC 只负责应用自持 ChatGPT 授权与受限 Responses model transport。完整 SDK 功能覆盖和原生 session 恢复仍有边界；准确接口见 [Space 存储接入](docs/space-storage.md)，当前建设状态见[建设路线](docs/harness-roadmap.md)。新执行使用 PostgreSQL；SQLite 只用于显式只读历史导入，不作为执行 fallback。旧 Codex trace 由 read-model 只读解码。
+**先读 [产品定位](docs/product.md) → [Space 工作台产品与交互](docs/workbench-presentation.md) → [架构](docs/architecture.md) → [实现状态](docs/harness-roadmap.md)。** Space 支持用 workflow 完成业务并持续改进方法，覆盖从业务目的、首版设计到执行、稳定运营与持续改进的生命周期。工作流内以 Archify 画布切换方法、执行、运营观察和版本演进；业务与资产提供跨案例入口，评价在对象旁展开。默认共享 Agent 路径由官方 OpenAI Agents SDK 的 Agent / Runner / tool 驱动；SIWC 负责应用自持 ChatGPT 授权与受限 Responses model transport。另有显式 opt-in 的 OpenSandbox 路径，已实测将完整 Codex CLI 或 Agents SDK loop 放进容器，并通过原生 Vault、同一 run 内串行共享环境；它不是所有 workflow 的默认 runner，也不提供跨 run 的环境恢复或生产 Space lease/fence。准确接口与边界见 [OpenSandbox 指南](docs/opensandbox.md)和[架构](docs/architecture.md)。新执行使用 PostgreSQL；SQLite 只用于显式只读历史导入，不作为执行 fallback。旧 Codex trace 由 read-model 只读解码；已退役的宿主 Codex runner 不会静默回退。
 
 本库从 self-media 提交 `c460d1cd` 抽离；设计背景见 [Issue #71](https://github.com/cyl19970726/self-media-content-intelligence/issues/71)。该 Issue 包含设计草案和宿主产品要求，当前 API 与能力边界以这里的代码、文档和测试为准。
 
@@ -43,6 +43,7 @@ npm run verify
 | [失败后恢复](examples/failure-recovery.mjs) | 保留成功分支资产、只重试失败角色、恢复阶段绑定、区分执行完成与内容仍有意见 |
 | [前端工作台](examples/read-model-web.mjs) | 本机浏览器查看安全快照、失败 attempt、显式重试和增量更新；运行后打开终端显示的地址 |
 | [PostgreSQL 存储](examples/postgres-run.mjs) | 确定性 task 写入 PG；新建连接读回并校验正文，再对同一 run replay；不调用模型。需设置 `WORKFLOW_DATABASE_URL` |
+| [OpenSandbox 共享节点示例](examples/opensandbox-shared.ts) | Codex CLI / Agents SDK 完整容器 loop、原生 Vault 和同 run 串行共享；[运行说明与其他示例](docs/opensandbox.md) |
 | [Agents SDK 接入](examples/agents-sdk-workflow.ts) | 官方 `Agent`／`Runner.run`、skill hash 绑定、PostgreSQL store 由宿主传入；默认只类型检查，调用导出函数才会运行模型 |
 
 ## 文档
@@ -80,6 +81,7 @@ npm run verify
 | `@signal-room/workflow-space-contracts` | JSON Schema 注册与依赖冻结、节点存储合同、字段视图与动作校验 |
 | `@signal-room/workflow-spaces` | PG 空间领域、版本与会话、受限 client/tools、core 桥接、评价比较和只读控制台 |
 | `@signal-room/workflow-agent-sdk` | 官方 Agents SDK `AgentRunner`、SIWC Responses 传输；见包内 README 的已实现范围 |
+| `@signal-room/workflow-opensandbox` | 显式 opt-in 的 OpenSandbox 容器内 Agent loop、环境 owner 与原生 Vault；不含跨 run 恢复、生产 Space lease 或提交 fence |
 | `@signal-room/workflow-skill-snapshot` | Provider-independent skill bundle capture、validation 与 materialization；不调用 Agent 或安装全局 skills |
 | `@signal-room/workflow-read-model` | 服务端范围查询与安全投影；`/contracts` 是浏览器安全类型入口 |
 | `@signal-room/workflow-space-api` | Space 查询与受限业务命令的 HTTP 合同和服务适配 |

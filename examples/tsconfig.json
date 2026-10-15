@@ -1,5 +1,5 @@
 {
   "extends": "../tsconfig.json",
   "compilerOptions": { "noEmit": true },
-  "include": ["agents-sdk-workflow.ts"]
+  "include": ["agents-sdk-workflow.ts", "opensandbox-*.ts"]
 }

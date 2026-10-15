@@ -1,6 +1,6 @@
 # 快速开始
 
-本文从 TypeScript 执行核心开始：给步骤稳定身份、记录运行／尝试／事件、复用已验证结果，并通过端口接入 Agent 与持久子流程。新持久执行使用 PostgreSQL `RunStore` 与官方 OpenAI Agents SDK runner；SIWC 是当前受限 runner 的 ChatGPT 授权与 Responses model transport。SQLite 仅允许明确选择的只读历史导入，不是新 run store 或 fallback。旧 Codex trace 只能由 read-model 只读解码。见[Space 存储指南](space-storage.md)、[产品](product.md)和[架构](architecture.md)。业务项目继续定义自己的业务方法与质量标准。
+本文从 TypeScript 执行核心开始：给步骤稳定身份、记录运行／尝试／事件、复用已验证结果，并通过端口接入 Agent 与持久子流程。默认持久 Agent 执行使用 PostgreSQL `RunStore` 与官方 OpenAI Agents SDK runner；SIWC 是当前受限 runner 的 ChatGPT 授权与 Responses model transport。另有显式 opt-in 的 OpenSandbox runner，支持完整 Codex CLI / Agents SDK loop 在容器内运行、native Vault 授权及同一 run 中串行共享环境；它不替换其他默认 runner，也不支持跨 run 环境恢复或生产 Space lease/fence。SQLite 仅允许明确选择的只读历史导入，不是新 run store 或 fallback。旧 Codex trace 只能由 read-model 只读解码。见[Space 存储指南](space-storage.md)、[产品](product.md)、[架构](architecture.md)和[OpenSandbox 指南](opensandbox.md)。业务项目继续定义自己的业务方法与质量标准。
 
 ## 环境与包
 
@@ -21,12 +21,13 @@ npm run check:examples
 - `@signal-room/workflow-space-contracts`：JSON Schema Registry 与冻结的 workflow storageContract。
 - `@signal-room/workflow-spaces`：PostgreSQL Space 领域服务、节点客户端、core runtime bridge 与只读控制台，见[Space 存储指南](space-storage.md)。
 - `@signal-room/workflow-agent-sdk`：官方 `@openai/agents` SDK 驱动的 `AgentRunner`，使用受限 SIWC Responses model transport。
+- `@signal-room/workflow-opensandbox`：可选容器内 Codex CLI / Agents SDK runner 与 environment owner；完整路径和安全边界见[OpenSandbox 指南](opensandbox.md)。
 - `@signal-room/workflow-skill-snapshot`：provider-independent skill bundle capture、校验与落盘；不会调用 Agent，也不会安装全局 skill。
 - `@signal-room/workflow-space-api` 与 `@signal-room/workflow-workbench-ui`：认证边界后的 HTTP contracts/services 与共享阅读组件。
 
-已退役的 `@signal-room/workflow-codex` 与 `@signal-room/workflow-sqlite` 不提供执行 fallback。旧 SQLite 数据只能由显式只读导入流程处理；旧 Codex trace 只能由 read-model 解码为历史证据。
+已退役的 `@signal-room/workflow-codex` 与 `@signal-room/workflow-sqlite` 不提供执行 fallback。旧 SQLite 数据只能由显式只读导入流程处理；旧 Codex trace 只能由 read-model 解码为历史证据。这里的 Codex 限制针对旧宿主 runner 和历史 trace；OpenSandbox 的 Codex CLI 是独立的容器内显式 runtime。
 
-仓库里的 [`examples/document-check.mjs`](../examples/document-check.mjs) 是最小可运行示例：它只使用内存存储和确定性任务，不需要模型授权。官方 SDK workflow 组合见 [`examples/agents-sdk-workflow.ts`](../examples/agents-sdk-workflow.ts)；该导出函数仅在宿主显式调用时请求模型，示例检查不会调用模型。
+仓库里的 [`examples/document-check.mjs`](../examples/document-check.mjs) 是最小可运行示例：它只使用内存存储和确定性任务，不需要模型授权。官方 SDK 宿主 workflow 组合见 [`examples/agents-sdk-workflow.ts`](../examples/agents-sdk-workflow.ts)；完整容器内 Codex 与 Agents SDK 共享环境示例见 [`examples/opensandbox-shared.ts`](../examples/opensandbox-shared.ts)。前者由宿主调用导出函数，后者也可显式运行命令；仅导入模块或类型检查均不会发起模型调用。
 
 ## 第一个 workflow
 
